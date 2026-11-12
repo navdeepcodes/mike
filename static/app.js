@@ -17,7 +17,7 @@ const pref = {
 
 const S = {
   ws: null, state: "offline", connected: false,
-  micOn: !pref.get("micOff", false), micOk: false, micPending: false, micError: "", micStream: null, micNode: null, workletLoaded: false,
+  micOn: true, micOk: false, micPending: false, micError: "", micStream: null, micNode: null, workletLoaded: false,
   camPresence: pref.get("camPresence", false), camStream: null, camTimer: null,
   audioCtx: null, analyser: null, hearing: false,
   gen: 0, speaking: "", lastTool: "", turn: null, confirmId: null, duck: false,
@@ -677,7 +677,7 @@ function stopMicStream() {
 }
 function setMic(on) {
   if (on && S.micOk && !S.micStream) { S.micOn = true; retryMic(); return; }   // muted earlier: reopen the mic
-  S.micOn = on; pref.set("micOff", !on);
+  S.micOn = on;   // mute lasts only until you unmute or restart Mike, so a restart never leaves it deaf
   if (!on) stopMicStream();
   const live = on && S.micOk;
   el.micBtn.classList.toggle("off", !live);

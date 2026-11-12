@@ -49,7 +49,7 @@ STOP = re.compile(r"^\W*(ok(ay)?\W+)?(stop|cancel|never ?mind|shut up|quiet|be q
 QUIT = re.compile(r"^\W*(please\W+)?(quit|exit|shut\W*down|turn\W*off|power\W*off|close|good\W*bye|bye(\W*bye)?)"
                   r"(\W+(yourself|now|please|mike|the\W*app|mike\W*app|for\W*now|for\W*today))*\W*$", re.I)
 # "Mike, stop listening" / "mute" / "go to sleep": the mic turns off (⌥⇧M or the mic button turns it back on).
-MUTE = re.compile(r"^\W*(please\W+)?(stop\W+listening|don'?t\W+listen|mute\W+(yourself|the\W*mic(rophone)?|mic(rophone)?)"
+MUTE = re.compile(r"^\W*(please\W+)?(go\W+)?(stop\W+listening|don'?t\W+listen|mute\W+(yourself|(the\W+|my\W+|your\W+)?mic(rophone)?)"
                   r"|(turn\W+)?(the\W+)?mic(rophone)?\W+off|turn\W+off\W+(the\W+)?mic(rophone)?|go\W*to\W*sleep|sleep)"
                   r"(\W+(to\W+me|now|please|mike|for\W*now|for\W*a\W*(bit|while)))*\W*$", re.I)
 RESET = re.compile(r"\b(new conversation|start over|fresh start|forget (this|that|everything)|reset)\b", re.I)
@@ -181,6 +181,8 @@ class Mike:
         self.claude_blocked_until = 0.0       # Claude Pro limit reached until this time
         self.turn_prompt = ""                 # the request as sent (with context), for retrying on the backup
         self.retried = False
+        self.ears.prefilter = self.voice_prefilter
+        self.voice_score: float | None = None   # voice-match score of the clip being handled
         self.ears.attentive = lambda: bool(self.pending_confirm) or self.state == "speaking" or (
             self.state == "listening" and time.time() < self.followup_until + 1.5)
 
@@ -461,7 +463,10 @@ class Mike:
             if hearing and self.state == "speaking" and config.BARGE_IN:
                 import math
                 if self.ears.is_near(20 * math.log10(max(level / 6, 1e-6))):
-                    await self.duck(True)
+                    if config.VOICE_MATCH and self.voice_id.ready:
+                        asyncio.create_task(self._duck_if_you(self.gen))   # noise must not dip his volume
+                    else:
+                        await self.duck(True)
             elif not hearing and self.ducked:
                 async def unduck_later(gen=self.gen):
                     await asyncio.sleep(3)
@@ -479,6 +484,19 @@ class Mike:
                     self.followup_until = max(getattr(self, "deadline_before", 0.0), time.time() + 4)
                     asyncio.create_task(self._expire_followup(self.followup_until))
 
+    def voice_prefilter(self, pcm: bytes) -> bool:
+        return (not config.VOICE_MATCH) or self.voice_id.maybe_user(pcm)
+
+    async def _duck_if_you(self, gen: int):
+        """Lower Mike's volume only once the first moments of speech sound like you."""
+        await asyncio.sleep(0.7)
+        if gen != self.gen or not self.hearing or self.state != "speaking":
+            return
+        pcm = b"".join(self.ears.speech)
+        ok = await asyncio.get_running_loop().run_in_executor(None, self.voice_id.maybe_user, pcm)
+        if ok and gen == self.gen and self.hearing and self.state == "speaking":
+            await self.duck(True)
+
     async def on_heard(self, text: str):
         await self.on_utterance(text, mic=True)
 
@@ -487,6 +505,7 @@ class Mike:
         if not config.VOICE_MATCH:
             return True
         ok, score = await asyncio.get_running_loop().run_in_executor(None, self.voice_id.is_user, self.ears.last_pcm)
+        self.voice_score = score
         if score is not None:
             log.info("voice match %.2f vs %.2f: %s", score, self.voice_id.threshold(), "you" if ok else "not you")
             if score >= 0.8:      # clearly you: keep the voice print fresh (new mic, a cold, a different room)
@@ -495,6 +514,7 @@ class Mike:
 
     async def on_utterance(self, text: str, mic: bool = False):
         log.info("heard: %s", text)
+        self.voice_score = None
         woke, command = split_wake(text)
         if mic and woke and self.ears.is_near(self.ears.last_db):
             # You called him by name, close to the mic: learn your voice from it.
@@ -523,7 +543,9 @@ class Mike:
 
         # Barge-in: you spoke while Mike was talking (no name needed).
         if not woke and config.BARGE_IN and (self.state == "speaking" or self.ducked):
-            if self.is_echo(text) or not self.ears.is_near(self.ears.last_db):
+            clearly_you = (self.voice_score is not None and config.VOICE_MATCH
+                           and self.voice_score >= self.voice_id.threshold() + 0.05)
+            if not clearly_you and (self.is_echo(text) or not self.ears.is_near(self.ears.last_db)):
                 log.info("ignored while speaking (%s): %s", "echo" if self.is_echo(text) else "quiet", text)
                 await self.duck(False)
                 return

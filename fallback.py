@@ -158,6 +158,7 @@ Recipes:
 - Play music: run_command open "spotify:search:WHAT" then ui(app="Spotify", find="Play") and press a
   matching "Play ..." button (not the bottom bar). For a vibe ("something nice"), search a playlist like "chill vibes".
   Pause/next: ui(app="Spotify", find="Pause"/"Next") and press. media keys are only a fallback.
+- Never change the Mac's microphone input volume or system mic settings, even if asked to mute or silence the mic: Mike's own mute handles that, and zeroing the system mic leaves him deaf. Speaker/output volume is fine.
 - Volume: run_command osascript -e "set volume output volume 40".
 - Weather: run_command curl -s "wttr.in/?format=%l:+%C+%t". Battery: pmset -g batt.
 - Files: mdfind -name "..." or mdfind "kind:pdf topic"; read PDFs with pdftotext FILE - | head -200.

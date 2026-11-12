@@ -91,6 +91,16 @@ class VoicePrint:
         score = self.similarity(v)
         return score >= self.threshold(), score
 
+    def maybe_user(self, pcm: bytes) -> bool:
+        """Lenient: False only when the clip clearly isn't you (TV, other people, noise).
+        Used to skip noise before the slow speech model; the strict check still runs later."""
+        if not self.ready:
+            return True
+        v = self.embed(pcm)
+        if v is None:
+            return True
+        return self.similarity(v) >= self.threshold() - 0.10
+
     def reset(self):
         self.samples = np.zeros((0, 0), dtype=np.float32)
         STORE.unlink(missing_ok=True)

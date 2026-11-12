@@ -74,6 +74,9 @@ class Ears:
         # Set by the server: True while Mike is waiting for you (after the name, follow-ups,
         # yes/no). Then every utterance gets the accurate model straight away.
         self.attentive: Callable[[], bool] = lambda: True
+        # Set by the server: quick yes/no on a clip (is it plausibly your voice?). Noise and other
+        # people are dropped before the slow speech model, so your real words are never stuck behind them.
+        self.prefilter: Callable[[bytes], bool] | None = None
         # Loudness learning: talk that isn't for Mike (TV, people in the room) vs. how loud you
         # are when you say the name. Follow-ups quieter than that are treated as background.
         self.bg_levels: list[float] = []
@@ -132,6 +135,15 @@ class Ears:
                 continue
             self.last_db = loudness_db(pcm)
             self.last_pcm = pcm
+            if attentive and self.prefilter is not None:
+                try:
+                    plausible = await loop.run_in_executor(None, self.prefilter, pcm)
+                except Exception:
+                    plausible = True
+                if not plausible:
+                    log.info("skipped a clip before transcribing (%.0f dB, not your voice)", self.last_db)
+                    self.bg_levels = (self.bg_levels + [self.last_db])[-40:]
+                    continue
             try:
                 text = await loop.run_in_executor(None, self._transcribe, pcm, attentive)
             except Exception:
