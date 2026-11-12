@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mike pet</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Silkscreen&family=Inter:wght@400;500&display=swap" rel="stylesheet">
+  <style>
+    /* Same pixel palette as Mike's main window. */
+    :root { color-scheme: dark; --u: 3px; --bubble: #1c1e3b; --ink: #eef1fb; --muted: #8d96b5; --pedge: #565c8a; --drop: rgba(8, 9, 26, 0.55);
+            --listen: #4be0a0; --ask: #f5b041; --think: #9a86ff; --accent: #ef6a3a; }
+    html, body { margin: 0; height: 100%; background: transparent; overflow: hidden; user-select: none; -webkit-user-select: none; cursor: default; }
+    body { font: 13px/1.4 "Inter", -apple-system, system-ui, sans-serif; color: var(--ink); font-variant-ligatures: none; }
+    /* In a normal browser tab, give it a backdrop so it's visible. */
+    body.browser { background: radial-gradient(circle at 50% 70%, #3a3550, #1a1824); }
+
+    .stage { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; transition: opacity 0.25s ease; }
+    .stage.hidden { opacity: 0; }
+    .sprite-wrap { position: relative; width: 160px; height: 160px; flex: none; transform-origin: 50% 90%; }
+    .sprite-wrap.flip canvas { transform: scaleX(-1); }
+    canvas#sprite { width: 160px; height: 160px; image-rendering: pixelated; display: block; }
+    .sprite-wrap.pop { animation: pop 0.45s cubic-bezier(.2, 1.6, .4, 1); }
+    .sprite-wrap.hop { animation: hop 0.5s ease-out; }
+    @keyframes pop { 0% { transform: scale(0.3) translateY(30px); } 100% { transform: none; } }
+    @keyframes hop { 0%, 100% { transform: none; } 40% { transform: translateY(-14px) scale(1.04, 0.96); } }
+
+    /* glass caption bubble */
+    .bubble {
+      position: relative; max-width: 236px; margin-bottom: -10px; padding: 9px 13px; border-radius: 16px;
+      background: rgba(38, 38, 36, 0.94); -webkit-backdrop-filter: blur(20px); backdrop-filter: blur(20px);
+      border: 0.5px solid rgba(222, 220, 209, 0.18);
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35), inset 0 0.5px 0 rgba(255, 255, 255, 0.18);
+      font: 13.5px/1.4 -apple-system, "SF Pro Text", system-ui, sans-serif; color: #f5f4ef; letter-spacing: -0.005em;
+      opacity: 0; transform: translateY(6px) scale(0.97); transition: opacity 0.22s ease, transform 0.22s cubic-bezier(.2, .9, .3, 1.2);
+      overflow-wrap: anywhere; z-index: 2;
+    }
+    .bubble.show { opacity: 1; transform: none; }
+    .bubble .kicker { display: flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 600; color: #9b998f; margin-bottom: 1px; }
+    .bubble .kicker:empty, .bubble .hint:empty, .bubble .text:empty { display: none; }
+    .bubble.ask { border-color: rgba(217, 119, 87, 0.6); } .bubble.ask .kicker { color: #d97757; }
+    .bubble.listen .kicker { color: #d97757; }
+    .bubble.think .kicker { color: #c3c1b8; }
+    .bubble .text { display: -webkit-box; -webkit-line-clamp: 5; -webkit-box-orient: vertical; overflow: hidden; }
+    .bubble .hint { display: block; color: #9b998f; font-size: 11.5px; margin-top: 3px; }
+  </style>
+</head>
+<body>
+  <div class="stage hidden" id="stage">
+    <div class="bubble" id="bubble"><span class="kicker" id="kicker"></span><span class="text" id="text"></span><span class="hint" id="hint"></span></div>
+    <div class="sprite-wrap" id="wrap"><canvas id="sprite" width="160" height="160"></canvas></div>
+  </div>
+  <script type="module" src="/static/pet.js"></script>
+</body>
+</html>

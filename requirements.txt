@@ -1,0 +1,11 @@
+fastapi>=0.115
+uvicorn[standard]>=0.30
+numpy>=1.26
+webrtcvad-wheels>=2.0.14
+mlx-whisper>=0.4          # speech recognition on the Mac's GPU
+huggingface_hub>=0.24     # model downloads (once), then used offline
+faster-whisper>=1.1       # CPU fallback if mlx isn't available
+kokoro-onnx>=0.4          # Mike's voice
+mcp>=1.2,<2               # Mike's tools for Claude Code
+websockets>=12            # test scripts talk to Mike over /ws
+sherpa-onnx

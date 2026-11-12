@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key><string>Mike</string>
+	<key>CFBundleDisplayName</key><string>Mike</string>
+	<key>CFBundleIdentifier</key><string>local.mike.assistant</string>
+	<key>CFBundleExecutable</key><string>Mike</string>
+	<key>CFBundlePackageType</key><string>APPL</string>
+	<key>CFBundleShortVersionString</key><string>1.0</string>
+	<key>CFBundleVersion</key><string>1</string>
+	<key>CFBundleIconFile</key><string>AppIcon</string>
+	<key>LSMinimumSystemVersion</key><string>13.0</string>
+	<key>LSApplicationCategoryType</key><string>public.app-category.productivity</string>
+	<key>NSHighResolutionCapable</key><true/>
+	<key>NSHumanReadableCopyright</key><string>Your personal assistant, powered by Claude Code.</string>
+	<key>NSMicrophoneUsageDescription</key><string>Mike listens for its name and your requests. Speech is transcribed on this Mac.</string>
+	<key>NSCameraUsageDescription</key><string>Mike looks through the camera only when you ask it to, and to notice when you're at your desk.</string>
+	<key>NSAppleEventsUsageDescription</key><string>Mike controls apps like Music or Spotify when you ask it to.</string>
+	<key>NSAppTransportSecurity</key>
+	<dict><key>NSAllowsLocalNetworking</key><true/></dict>
+	<key>MikeHome</key><string>__MIKE_HOME__</string>
+	<key>MikePort</key><integer>8777</integer>
+</dict>
+</plist>

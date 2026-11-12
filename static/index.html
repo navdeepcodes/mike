@@ -1,0 +1,306 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mike</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body data-state="offline">
+  <div class="app" id="app">
+    <!-- ===================================================== sidebar -->
+    <aside class="side" id="side">
+      <div class="side-top drag">
+        <button class="icon-btn nodrag" id="sideToggle" title="Hide sidebar (⌘\)">
+          <svg viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><path d="M9.5 4.5v15"/></svg>
+        </button>
+      </div>
+      <div class="brand">
+        <span class="mark" aria-hidden="true"><i></i><i></i><i></i></span>
+        <span class="brand-name">Mike</span>
+      </div>
+      <button class="new-btn" id="newBtn" title="New conversation (⌘N)">
+        <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg><span>New conversation</span>
+      </button>
+      <nav class="nav" id="nav">
+        <button data-view="chat" class="on"><svg viewBox="0 0 24 24"><path d="M5 18.5V6.5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H8.5z"/></svg><span>Chat</span></button>
+        <button data-view="history"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 8v4l2.5 2.5"/></svg><span>History</span></button>
+        <button data-view="memory"><svg viewBox="0 0 24 24"><path d="M12 4.5c-3.6 0-6.5 2.6-6.5 6 0 2.1 1.1 3.7 2.6 4.8V19h7.8v-3.7c1.5-1.1 2.6-2.7 2.6-4.8 0-3.4-2.9-6-6.5-6zM9.5 21.5h5"/></svg><span>Memory</span></button>
+        <button data-view="reminders"><svg viewBox="0 0 24 24"><path d="M6.5 9a5.5 5.5 0 0 1 11 0c0 5.5 2 7 2 7h-15s2-1.5 2-7M10.3 19.5a2 2 0 0 0 3.4 0"/></svg><span>Reminders</span><em class="count" id="remCount"></em></button>
+      </nav>
+      <div class="recents">
+        <div class="side-label">Recent days</div>
+        <div class="recent-list" id="recentList"></div>
+      </div>
+      <div class="side-foot">
+        <div class="usage" id="usage" title="Claude Pro usage in the current 5-hour window">
+          <div class="usage-row"><span>Claude Pro</span><span id="usageText">—</span></div>
+          <div class="meter"><i id="usageBar"></i></div>
+          <div class="usage-sub" id="resetText"></div>
+        </div>
+        <button class="me" id="meBtn" title="Settings (⌘,)">
+          <span class="avatar" id="avatar">N</span>
+          <span class="me-name" id="meName">You</span>
+          <svg viewBox="0 0 24 24" class="gear"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 0 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 0 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 0 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 0 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+        </button>
+      </div>
+    </aside>
+
+    <!-- ===================================================== main -->
+    <main class="pane">
+      <header class="top drag">
+        <button class="icon-btn nodrag side-open" id="sideOpen" title="Show sidebar (⌘\)">
+          <svg viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><path d="M9.5 4.5v15"/></svg>
+        </button>
+        <div class="top-title" id="topTitle">Mike</div>
+        <div class="top-right">
+          <div class="status nodrag" id="status" title="What Mike is doing">
+            <span class="mark live" aria-hidden="true"><i></i><i></i><i></i></span>
+            <span id="statusText">Starting</span>
+          </div>
+          <button class="icon-btn nodrag" id="camBtn" title="Camera">
+            <svg viewBox="0 0 24 24"><path d="M3.5 8.5a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-8a2 2 0 0 1-2-2zM15.5 11l5-3v8l-5-3"/></svg>
+          </button>
+          <button class="icon-btn nodrag" id="micBtn" title="Microphone">
+            <svg class="ico-on" viewBox="0 0 24 24"><rect x="9" y="3.5" width="6" height="11" rx="3"/><path d="M5.5 11.5a6.5 6.5 0 0 0 13 0M12 18v2.5"/></svg>
+            <svg class="ico-off" viewBox="0 0 24 24"><path d="M4 4l16 16M9 9v2.5a3 3 0 0 0 5 2.2M15 10.5V6.5a3 3 0 0 0-5.8-1M5.5 11.5a6.5 6.5 0 0 0 10.6 5M18.3 13.3a6.5 6.5 0 0 0 .2-1.8M12 18v2.5"/></svg>
+          </button>
+        </div>
+      </header>
+
+      <!-- camera preview -->
+      <div class="pip hidden" id="pip">
+        <video id="cam" autoplay playsinline muted></video>
+        <div class="pip-flash" id="camFlash"></div>
+        <div class="pip-foot"><span id="presence">Camera off</span><button class="link" id="pipClose">Turn off</button></div>
+      </div>
+
+      <!-- ------------------------------------------- chat -->
+      <section class="view chat" id="view-chat" data-view="chat">
+        <div class="thread" id="thread" aria-live="polite">
+          <div class="hero" id="empty">
+            <span class="mark big" aria-hidden="true"><i></i><i></i><i></i></span>
+            <h1 id="greeting">Good evening</h1>
+            <p class="hero-sub">Say “Mike”, press <kbd>⌥</kbd><kbd>Space</kbd>, or type below.</p>
+          </div>
+        </div>
+
+        <div class="dock">
+          <div class="caption" id="caption" aria-live="polite"></div>
+
+          <div class="confirm hidden" id="confirm" role="dialog" aria-labelledby="confirmTitle">
+            <div class="confirm-body">
+              <div class="confirm-title" id="confirmTitle"></div>
+              <div class="confirm-sub">Say “yes” or “no”, or choose below.</div>
+              <details><summary>Details</summary><pre id="confirmDetail"></pre></details>
+            </div>
+            <div class="confirm-actions">
+              <button class="btn" id="denyBtn">Don't allow</button>
+              <button class="btn primary" id="allowBtn">Allow</button>
+            </div>
+          </div>
+
+          <form class="composer" id="form">
+            <textarea id="input" rows="1" autocomplete="off" spellcheck="false" placeholder="Talk or type to Mike"></textarea>
+            <div class="composer-row">
+              <div class="composer-left">
+                <button type="button" class="chip-btn" id="talkBtn" title="Talk (⌥Space)">
+                  <span class="mark" aria-hidden="true"><i></i><i></i><i></i></span><span id="talkText">Talk</span>
+                </button>
+              </div>
+              <div class="composer-right">
+                <div class="model-pick">
+                  <button type="button" class="model-btn" id="modelBtn"><span id="modelName">Haiku 5.5</span><svg viewBox="0 0 24 24"><path d="M7 10l5 5 5-5"/></svg></button>
+                  <div class="menu hidden" id="modelMenu" role="menu"></div>
+                </div>
+                <button type="button" class="send stop hidden" id="stopBtn" title="Stop (Esc)"><svg viewBox="0 0 24 24"><rect x="7.5" y="7.5" width="9" height="9" rx="1.5"/></svg></button>
+                <button type="submit" class="send" id="sendBtn" title="Send (Return)"><svg viewBox="0 0 24 24"><path d="M12 18.5v-13M6.5 11L12 5.5l5.5 5.5"/></svg></button>
+              </div>
+            </div>
+          </form>
+          <div class="suggest" id="suggestions">
+            <button data-say="What's on my screen right now?">What's on my screen?</button>
+            <button data-say="What have I got coming up?">What's coming up?</button>
+            <button data-say="Put on something to focus to on Spotify.">Focus music</button>
+            <button data-say="What was I working on lately?">What was I working on?</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- ------------------------------------------- history -->
+      <section class="view page hidden" id="view-history" data-view="history">
+        <div class="page-inner">
+          <div class="page-head">
+            <h2>History</h2>
+            <p>Every conversation with Mike, by day. Mike can search this too, just ask.</p>
+          </div>
+          <div class="search"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="M20 20l-4.2-4.2"/></svg><input id="historySearch" placeholder="Search conversations"></div>
+          <div class="day-tabs" id="dayTabs"></div>
+          <div class="history" id="historyList"></div>
+        </div>
+      </section>
+
+      <!-- ------------------------------------------- memory -->
+      <section class="view page hidden" id="view-memory" data-view="memory">
+        <div class="page-inner">
+          <div class="page-head">
+            <h2>Memory</h2>
+            <p>What Mike knows about you. He adds to it as you talk; you can edit it any time.</p>
+          </div>
+          <form class="add-row" id="memoryForm">
+            <input id="memoryInput" placeholder="Add something Mike should remember…" autocomplete="off">
+            <button class="btn" type="submit">Add</button>
+          </form>
+          <ul class="list" id="memoryList"></ul>
+          <div class="page-foot" id="memoryFoot"></div>
+        </div>
+      </section>
+
+      <!-- ------------------------------------------- reminders -->
+      <section class="view page hidden" id="view-reminders" data-view="reminders">
+        <div class="page-inner">
+          <div class="page-head">
+            <h2>Reminders</h2>
+            <p>Reminders, timers and alarms Mike will say out loud. Try “Mike, remind me at 6 to call home”.</p>
+          </div>
+          <ul class="list" id="reminderList"></ul>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- ===================================================== settings -->
+  <div class="overlay hidden" id="settings" role="dialog" aria-label="Settings">
+    <div class="modal">
+      <aside class="modal-nav" id="setNav">
+        <div class="modal-title">Settings</div>
+        <button data-sec="general" class="on">General</button>
+        <button data-sec="model">Model</button>
+        <button data-sec="voice">Voice &amp; hearing</button>
+        <button data-sec="memory">Memory</button>
+        <button data-sec="proactive">Proactive</button>
+        <button data-sec="pet">Desktop pet</button>
+        <button data-sec="privacy">Privacy &amp; permissions</button>
+        <button data-sec="about">About</button>
+      </aside>
+      <div class="modal-body">
+        <button class="icon-btn modal-close" id="setClose" title="Close (Esc)"><svg viewBox="0 0 24 24"><path d="M6.5 6.5l11 11M17.5 6.5l-11 11"/></svg></button>
+
+        <section class="sec" data-sec="general">
+          <h3>General</h3>
+          <div class="row"><div class="row-text"><b>What should Mike call you?</b><span>Used in greetings.</span></div>
+            <input class="field" id="setName" placeholder="Your name"></div>
+          <div class="row"><div class="row-text"><b>Appearance</b></div>
+            <div class="seg" id="setTheme"><button data-v="dark">Dark</button><button data-v="light">Light</button><button data-v="system">System</button></div></div>
+          <div class="row"><div class="row-text"><b>Open at login</b><span>Start Mike when you log in to your Mac.</span></div>
+            <button class="switch" id="setLogin" role="switch"><i></i></button></div>
+          <div class="row"><div class="row-text"><b>Show this window at launch</b><span>Otherwise Mike starts quietly as the desktop pet.</span></div>
+            <button class="switch" id="setShowLaunch" role="switch"><i></i></button></div>
+          <div class="row"><div class="row-text"><b>Sounds</b><span>A soft chime when Mike starts and stops listening.</span></div>
+            <button class="switch" id="setChime" role="switch"><i></i></button></div>
+          <div class="row col"><div class="row-text"><b>Keyboard shortcuts</b></div>
+            <div class="keys">
+              <div><span>Talk to Mike, from any app</span><span><kbd>⌥</kbd><kbd>Space</kbd></span></div>
+              <div><span>Quit Mike, from any app</span><span><kbd>⌥</kbd><kbd>⇧</kbd><kbd>Q</kbd></span></div>
+              <div><span>Stop Mike</span><span><kbd>Esc</kbd></span></div>
+              <div><span>New conversation</span><span><kbd>⌘</kbd><kbd>N</kbd></span></div>
+              <div><span>Settings</span><span><kbd>⌘</kbd><kbd>,</kbd></span></div>
+            </div></div>
+        </section>
+
+        <section class="sec hidden" data-sec="model">
+          <h3>Model</h3>
+          <div class="choices" id="setModels"></div>
+          <div class="row"><div class="row-text"><b>Thinking effort</b><span>More effort is smarter but slower to answer.</span></div>
+            <div class="seg" id="setEffort"><button data-v="low">Low</button><button data-v="medium">Medium</button><button data-v="high">High</button></div></div>
+          <div class="row"><div class="row-text"><b>Start fresh after a break</b><span>Keeps replies fast. Memory carries over.</span></div>
+            <select class="field select" id="setFresh"><option value="15">15 minutes</option><option value="30">30 minutes</option><option value="60">1 hour</option><option value="180">3 hours</option><option value="0">Never</option></select></div>
+          <div class="row"><div class="row-text"><b>Claude Pro usage</b><span id="setUsage">Shown after your first request</span></div>
+            <button class="btn" id="setReset">New conversation</button></div>
+          <h4 class="sub">Backup brain</h4>
+          <p class="sec-note">When your Claude limit runs out or Claude can't be reached, Mike keeps going on free models: cloud first, then a model on your Mac if you're offline. He switches back to Claude by himself.</p>
+          <div class="row"><div class="row-text"><b>Use the backup</b><span id="backupState">Add a free key below to turn it on.</span></div>
+            <div class="seg" id="setBrainMode"><button data-v="auto">Automatically</button><button data-v="claude">Never</button><button data-v="free">Always</button></div></div>
+          <div class="perms" id="providers"></div>
+        </section>
+
+        <section class="sec hidden" data-sec="voice">
+          <h3>Voice &amp; hearing</h3>
+          <div class="row"><div class="row-text"><b>Voice</b></div>
+            <div class="inline"><select class="field select" id="setVoice"></select><button class="btn" id="setVoicePreview">Preview</button></div></div>
+          <div class="row"><div class="row-text"><b>Speaking speed</b><span id="setSpeedText">1.05×</span></div>
+            <input type="range" class="range" id="setSpeed" min="0.8" max="1.4" step="0.05"></div>
+          <div class="row"><div class="row-text"><b>Listen for “Mike”</b><span>Off: start Mike with ⌥Space, the pet, or by typing.</span></div>
+            <button class="switch" id="setWake" role="switch"><i></i></button></div>
+          <div class="row"><div class="row-text"><b>Talk over Mike</b><span>Start speaking while he talks and he stops to listen.</span></div>
+            <button class="switch" id="setBarge" role="switch"><i></i></button></div>
+          <div class="row"><div class="row-text"><b>Only answer my voice</b><span>Without his name, Mike only responds to your voice, so TV and videos can't talk to him. He learns your voice each time you say “Mike”.</span></div>
+            <div class="inline"><button class="btn" id="voiceReset">Relearn</button><button class="switch" id="setVoiceMatch" role="switch"><i></i></button></div></div>
+          <div class="row"><div class="row-text"><b>Keep listening after a reply</b><span>Answer back without saying his name again.</span></div>
+            <select class="field select" id="setFollow"><option value="0">Off</option><option value="6">6 seconds</option><option value="10">10 seconds</option><option value="15">15 seconds</option><option value="25">25 seconds</option></select></div>
+          <div class="row"><div class="row-text"><b>Microphone</b><span id="micHint">Mike listens on this device.</span></div>
+            <div class="inline"><select class="field select" id="setMicDevice"></select><button class="switch" id="setMic" role="switch"><i></i></button></div></div>
+        </section>
+
+        <section class="sec hidden" data-sec="memory">
+          <h3>Memory</h3>
+          <div class="row"><div class="row-text"><b>Remember automatically</b><span>After each conversation, Mike saves what's worth keeping.</span></div>
+            <button class="switch" id="setMemAuto" role="switch"><i></i></button></div>
+          <div class="row"><div class="row-text"><b>Use Claude's memory</b><span id="setClaudeMemText">Mike reads the notes from your Claude Code sessions.</span></div>
+            <button class="switch" id="setClaudeMem" role="switch"><i></i></button></div>
+          <div class="row"><div class="row-text"><b>What Mike knows</b><span id="setMemCount">—</span></div>
+            <div class="inline"><button class="btn" id="setMemOpen">View memory</button><button class="btn" id="setMemFile">Open file</button></div></div>
+        </section>
+
+        <section class="sec hidden" data-sec="proactive">
+          <h3>Proactive</h3>
+          <div class="row"><div class="row-text"><b>Welcome back</b><span>A short hello when you return after a while.</span></div>
+            <button class="switch" id="setWelcome" role="switch"><i></i></button></div>
+          <div class="row"><div class="row-text"><b>Morning briefing</b><span>Weather and what's on today, the first time you sit down.</span></div>
+            <button class="switch" id="setMorning" role="switch"><i></i></button></div>
+          <div class="row"><div class="row-text"><b>Break reminders</b><span>A nudge to stretch after working nonstop.</span></div>
+            <select class="field select" id="setBreak"><option value="0">Off</option><option value="60">Every hour</option><option value="90">Every 90 minutes</option><option value="120">Every 2 hours</option><option value="180">Every 3 hours</option></select></div>
+        </section>
+
+        <section class="sec hidden" data-sec="pet">
+          <h3>Desktop pet</h3>
+          <div class="row"><div class="row-text"><b>Show the pet</b><span>The pet is how Mike appears when you call him.</span></div>
+            <div class="seg" id="setPetMode"><button data-v="active">When active</button><button data-v="always">Always</button><button data-v="off">Never</button></div></div>
+          <div class="pet-grid" id="petGrid"></div>
+        </section>
+
+        <section class="sec hidden" data-sec="privacy">
+          <h3>Privacy &amp; permissions</h3>
+          <p class="sec-note">Speech is transcribed on your Mac. Only your requests go to Claude, on your Pro plan.</p>
+          <div class="perms" id="perms"></div>
+          <div class="row"><div class="row-text"><b>Use the camera to notice you</b><span>Off: Mike notices you from keyboard and mouse activity and only turns the camera on when you ask him to look.</span></div>
+            <button class="switch" id="setCamPresence" role="switch"><i></i></button></div>
+          <div class="row"><div class="row-text"><b>Camera</b></div><select class="field select" id="setCamDevice"></select></div>
+        </section>
+
+        <section class="sec hidden" data-sec="about">
+          <h3>About</h3>
+          <div class="about">
+            <span class="mark big" aria-hidden="true"><i></i><i></i><i></i></span>
+            <div><b>Mike</b><span id="aboutVersion">Version 1.0</span></div>
+          </div>
+          <div class="row"><div class="row-text"><b>Brain</b><span id="aboutBrain">Claude Code on your Claude Pro plan</span></div></div>
+          <div class="row"><div class="row-text"><b>Data folder</b><span id="aboutData">~/mike/data</span></div>
+            <button class="btn" id="aboutOpenData">Show in Finder</button></div>
+          <div class="row"><div class="row-text"><b>Quit Mike</b><span>Also stops listening. Shortcut: ⌥⇧Q.</span></div>
+            <button class="btn danger" id="aboutQuit">Quit</button></div>
+        </section>
+      </div>
+    </div>
+  </div>
+
+  <div class="overlay hidden" id="gate">
+    <div class="gate">
+      <p>Mike needs one click to start listening and speaking.</p>
+      <button class="btn primary" id="gateBtn">Start Mike</button>
+    </div>
+  </div>
+
+  <script type="module" src="/static/app.js"></script>
+</body>
+</html>

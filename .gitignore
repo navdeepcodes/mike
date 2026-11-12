@@ -1,0 +1,12 @@
+# Secrets and your personal data: never commit these
+data/
+.env
+.env.*
+*.key
+
+# Python / build output
+.venv/
+__pycache__/
+*.pyc
+app/build/
+workspace/
