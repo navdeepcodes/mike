@@ -262,7 +262,7 @@ def sync_claude_memory() -> str:
             continue
         name = meta.get("name", path.stem)
         where = _where(path.parent.parent.name)
-        index.append(f"- {name} ({where}): {meta.get('description', '')[:170]}")
+        index.append(f"- {name} ({where}): {meta.get('description', '')[:110]}")
         full.append(f"\n## {name}\nFrom: {where}\n\n{body}\n")
     try:
         CLAUDE_MEMORY_FILE.write_text("\n".join(full))

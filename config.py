@@ -37,6 +37,7 @@ MODEL = None                # None = Claude Code's default for your plan. Or "so
 EFFORT = "low"              # snappy replies; set None for deeper thinking
 # Built-in Claude Code tools Mike gets. Fewer tools = shorter prompt = faster first word.
 TOOLS = ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "WebSearch", "WebFetch"]
+MAX_SESSION_TURNS = 25   # a very long conversation costs more every turn; restart it (memory carries over)
 FRESH_AFTER_MIN = 30        # after this long without talking, start a fresh (fast) conversation;
                             # long-term memory and recent exchanges carry over automatically
 

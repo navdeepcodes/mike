@@ -43,6 +43,19 @@ WAKE_RE = re.compile(
 )
 YES = re.compile(r"\b(yes|yeah|yep|yup|sure|do it|go ahead|go for it|okay|ok|confirm|approved?|affirmative|please do)\b", re.I)
 NO = re.compile(r"\b(no|nope|nah|don't|do not|stop|cancel|deny|negative|never mind|abort)\b", re.I)
+# Simple device commands run right here: instant, and they cost no Claude usage at all.
+_PLEASE = r"^\W*(?:(?:please|hey|can you|could you)\W+)*"
+_END = r"(?:\W+(?:please|now|for me|a bit|a little|just a little))*\W*$"
+LOCAL_MEDIA = [
+    (re.compile(_PLEASE + r"(?:skip|next)(?:\W+(?:this|the|that))?\W+(?:song|track)" + _END, re.I), "next", 1, "Next."),
+    (re.compile(_PLEASE + r"(?:previous|last|go\W+back)(?:\W+(?:to\W+)?(?:the|that))?(?:\W+(?:song|track))" + _END, re.I), "previous", 1, "Going back."),
+    (re.compile(_PLEASE + r"pause(?:\W+(?:the|this|that))?\W+(?:music|song|track|video|playback)" + _END, re.I), "play_pause", 1, "Paused."),
+    (re.compile(_PLEASE + r"(?:turn\W+(?:it|the\W+volume)\W+up|volume\W+up|turn\W+up\W+the\W+volume|louder|increase\W+the\W+volume)" + _END, re.I), "volume_up", 2, "Louder."),
+    (re.compile(_PLEASE + r"(?:turn\W+(?:it|the\W+volume)\W+down|volume\W+down|turn\W+down\W+the\W+volume|quieter|lower\W+the\W+volume|decrease\W+the\W+volume)" + _END, re.I), "volume_down", 2, "Quieter."),
+]
+LOCAL_TIME = re.compile(_PLEASE + r"(?:what(?:'s|\W+is)\W+(?:the\W+)?time(?:\W+is\W+it)?|what\W+time\W+is\W+it|tell\W+me\W+the\W+time)" + _END, re.I)
+LOCAL_DATE = re.compile(_PLEASE + r"(?:what(?:'s|\W+is)\W+(?:the\W+|today'?s\W+)?date(?:\W+today)?|what\W+day\W+is\W+it(?:\W+today)?)" + _END, re.I)
+
 STOP = re.compile(r"^\W*(ok(ay)?\W+)?(stop|cancel|never ?mind|shut up|quiet|be quiet|that's enough|enough|wait|hold on|hang on|pause"
                   r"|one sec(ond)?|stop talking)(\W+(mike|please|a sec(ond)?|a minute))*\W*$", re.I)
 # "Mike, quit" / "shut down" / "go to sleep" / "goodbye": the whole command, so "close Roblox" never matches.
@@ -162,6 +175,7 @@ class Mike:
         self.turn_user = ""                 # what the current turn was asked (for the journal)
         self.turn_reply: list[str] = []
         self.turn_no = 0
+        self.session_turns = 0
         self.recent_said: list[str] = []
         self.script_ok: dict[str, bool] = {}     # apps macOS already lets Mike script
         self.ducked = False
@@ -593,6 +607,32 @@ class Mike:
         return (config.BRAIN_MODE == "auto" and time.time() < self.claude_blocked_until
                 and bool(self.backup.available()))
 
+    async def try_local(self, command: str) -> bool:
+        """Handle a plain device command without Claude. False means: not one of those, ask the brain."""
+        text = split_wake(command)[1] or command if split_wake(command)[0] else command
+        reply = None
+        if LOCAL_TIME.match(text):
+            reply = f"It's {time.strftime('%-I:%M %p')}."
+        elif LOCAL_DATE.match(text):
+            reply = f"It's {time.strftime('%A, %-d %B')}."
+        else:
+            for rx, action, times, said in LOCAL_MEDIA:
+                if rx.match(text):
+                    res = await self.native("media", {"action": action, "times": times}, timeout=5)
+                    if res.get("error"):
+                        return False          # couldn't do it here: let the brain try
+                    reply = said
+                    break
+        if reply is None:
+            return False
+        log.info("handled locally (no Claude): %s", text)
+        await self.send({"type": "user", "text": command})
+        await self.send({"type": "assistant_done", "cost": 0})
+        self.followup_until = 0
+        self.offer_followup = True
+        self.say(reply)
+        return True
+
     async def handle_command(self, command: str, allow_quit: bool = True):
         if STOP.match(command):
             await self.interrupt()
@@ -636,17 +676,22 @@ class Mike:
             self.offer_followup = True
             self.say(f"Switched to {name.capitalize()}.")
             return
+        if await self.try_local(command):
+            return
         self.followup_until = 0
         await self.set_state("thinking")
         await self.send({"type": "user", "text": command})
         # After a break, start a fresh conversation: small context = fast and cheap. Memory
         # (facts + latest exchanges) is in the system prompt, so nothing important is lost.
         now = time.time()
-        if (config.FRESH_AFTER_MIN and self.brain.session_id and not self.brain.busy
-                and now - self.last_command_at > config.FRESH_AFTER_MIN * 60):
-            log.info("fresh conversation after a break")
+        too_long = bool(getattr(config, "MAX_SESSION_TURNS", 0)) and self.session_turns >= config.MAX_SESSION_TURNS
+        if (self.brain.session_id and not self.brain.busy
+                and ((config.FRESH_AFTER_MIN and now - self.last_command_at > config.FRESH_AFTER_MIN * 60) or too_long)):
+            log.info("fresh conversation after %s", "a long chat" if too_long else "a break")
             await self.brain.reset()
             self.backup.reset()
+            self.session_turns = 0
+        self.session_turns += 1
         self.last_command_at = now
         self.turn_user, self.turn_reply = command, []
         self.turn_no += 1
@@ -743,7 +788,7 @@ class Mike:
                 continue
             try:
                 n = await loop.run_in_executor(None, memory.pending_count)
-                if n < 2:
+                if n < 4:
                     continue
                 out = await loop.run_in_executor(None, memory.consolidate)
                 log.info("memory consolidated from %d exchanges: %s", n, out)
