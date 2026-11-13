@@ -626,6 +626,7 @@ class Mike:
     async def on_utterance(self, text: str, mic: bool = False):
         log.info("heard: %s", text)
         self.t_heard = time.time()      # for the "heard → first sound" timing in speech_worker
+        self.heard_alt = (text, getattr(self.ears, "alt", "") if mic else "")
         self.voice_score = None
         woke, command = split_wake(text)
         if mic and woke and self.ears.is_near(self.ears.last_db):
@@ -681,8 +682,12 @@ class Mike:
         if not woke and not in_followup:
             return  # background chatter
         if not woke and not self.ears.is_near(self.ears.last_db):
-            log.info("ignored as background (too quiet to be you): %s", text)
-            return
+            # Loudness is only a guess at "is this you". A clear voice match beats it, so a quiet
+            # or turned-away follow-up in your voice isn't thrown out (it was: 0.83 match, dropped).
+            clearly_you = self.voice_score is not None and self.voice_score >= self.voice_id.threshold() + 0.05
+            if not clearly_you:
+                log.info("ignored as background (too quiet to be you): %s", text)
+                return
 
         await self.send({"type": "transcript", "text": text})
         if not woke:
@@ -1058,6 +1063,10 @@ class Mike:
         if ctx.get("window"):
             bits.append(f"window: {ctx['window']}")
         note = "[context: " + " | ".join(bits) + "]"
+        said, alt = getattr(self, "heard_alt", ("", ""))
+        if alt and command.strip() and command.strip() in said:
+            note += (f"\n[speech recognition was unsure of this request; a second listen heard: \"{alt}\". "
+                     "Use whichever makes sense as an everyday request.]")
         if ctx.get("selected"):
             note += f"\n[selected text in that app: {ctx['selected']}]"
         return f"{note}\n{command}"

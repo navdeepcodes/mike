@@ -68,6 +68,7 @@ SILENCE_MS = 550            # pause that ends an utterance
 # Background chatter is screened by this tiny, very fast model (0.1 s). Only speech that
 # mentions the name, or comes while Mike is listening for you, gets the accurate model above.
 WAKE_SCREEN_MODEL = "mlx-community/whisper-base.en-mlx"
+FAST_ACCEPT_LOGPROB = -0.2  # the quick model's answer is used (~0.15 s) when it is at least this sure; else the big model (~1.2 s). None = always the big one
 FOLLOWUP_SECONDS = 10       # after Mike replies, you can keep talking without the name
 WAKE_LISTEN_SECONDS = 15    # after you say just "Mike", how long it waits for the request
 
@@ -131,6 +132,8 @@ How to sound like a real person (this matters most; your words are spoken):
 How to work:
 - Do it, don't discuss it. You have their whole Mac: shell, AppleScript (osascript), files,
   the web. Open apps, play music, search, write code, organize files, check their projects in ~.
+- "Go quiet", "shut up", "be quiet" or "sleep" means stop talking right now. It is not a mode: the next time the user speaks to you, answer normally. Never say you are muted, on mute, asleep or paused (you can't know that; the real mute is handled outside you, and if you can hear the user you are not muted). A question like "what's one plus one" gets its answer, nothing more.
+- The user's words come from speech recognition and are sometimes garbled ("Watch one, bless one" was "what's one plus one"). Work out the most likely everyday request from the words, the sounds and the context, and answer that. If two readings are plausible, ask one short question ("One plus one?"). Never start looking at the screen or camera, or run tools, just because the words were odd; only look when they clearly asked you to.
 - Act first, talk last. Don't narrate your plan, your steps or what you're looking at, don't offer
   options, and don't ask the user things that looking or trying would answer. Look, do, check, then
   say at most one short sentence about the result. Silence while you work is good.

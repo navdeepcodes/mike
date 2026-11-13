@@ -4,6 +4,7 @@ Audio arrives from the browser as 16 kHz mono int16 PCM. We cut it into
 utterances with WebRTC VAD and transcribe each one locally (no quota used).
 """
 import asyncio
+import difflib
 import logging
 import re
 import time
@@ -30,7 +31,19 @@ WAKE_HINT = f"Glossary: {config.NAME} (the assistant's name)."
 # For the accurate model: a few short requests that start with the name, so it spells "Mike," as a
 # name and not "My," / "Mic," / "Might" (measured: word errors on clean speech 10% -> 3%, with
 # room chatter behind 29% -> 5%). Filtered below like any other segment, so noise can't pass as speech.
-ADDRESS_HINT = f"{config.NAME}, what time is it? {config.NAME}, play some music. Hey {config.NAME}, open Safari."
+# Varied everyday requests (maths, weather, alarms, general questions) so "plus" isn't heard as "bless" and
+# numbers and questions come out the way they're said. Measured on accented test voices: 13% -> 3% word errors.
+HINT_SENTENCES = [f"{config.NAME}, what's seventeen plus twenty six?", f"Hey {config.NAME}, set an alarm for six forty five.",
+                 f"{config.NAME}, what's the capital of Peru?", f"{config.NAME}, read me the next chapter."]
+ADDRESS_HINT = " ".join(HINT_SENTENCES)
+
+
+def _is_hint_echo(text: str) -> bool:
+    """Steady noise can make Whisper recite the hint; unusual sentences, so a real request never matches."""
+    norm = lambda t: re.sub(r"[^a-z0-9 ]", "", re.sub(rf"^\W*(hey\W+)?{config.NAME}\W+", "", t.lower().strip(), flags=re.I)).strip()
+    t = norm(text)
+    return bool(t) and any(difflib.SequenceMatcher(None, t, norm(h)).ratio() >= 0.9 for h in HINT_SENTENCES)
+
 
 # Whisper invents these from noise; ignore them when they are the whole utterance.
 HALLUCINATIONS = {"", "you", "thank you", "thanks for watching", "thank you for watching",
@@ -139,7 +152,9 @@ class Ears:
                 continue
             self.last_db = loudness_db(pcm)
             self.last_pcm = pcm
-            if attentive and self.prefilter is not None:
+            # Every clip, not only follow-ups: a TV or another person saying "Mike" shouldn't wake him,
+            # and room talk shouldn't cost a speech-model pass. Lenient: only clips clearly not you.
+            if self.prefilter is not None:
                 try:
                     plausible = await loop.run_in_executor(None, self.prefilter, pcm)
                 except Exception:
@@ -155,6 +170,9 @@ class Ears:
                 log.exception("transcription failed")
                 continue
             log.info("timing: transcribed %.1fs of speech in %.2fs", len(pcm) / (RATE * 2), time.time() - t0)
+            if text and _is_hint_echo(text):
+                log.info("dropped: that is the hint being recited, not speech: %r", text[:80])
+                text = ""
             if text and text.lower().strip(" .,!?") not in HALLUCINATIONS:
                 if self.wake_re.search(text):
                     self.wake_level = self.last_db if self.wake_level is None else 0.7 * self.wake_level + 0.3 * self.last_db
@@ -171,6 +189,8 @@ class Ears:
 
     def _transcribe(self, pcm: bytes, attentive: bool = True) -> str:
         qtext = ""
+        self.alt = ""          # a second opinion when the two models disagree (the brain gets to weigh it)
+        fast_text = ""
         audio = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
         # Whisper tends to drop a word that starts right at sample 0; a little silence in front fixes it.
         audio = np.concatenate([np.zeros(RATE // 4, dtype=np.float32), audio])
@@ -195,9 +215,26 @@ class Ears:
                 self.bg_levels = (self.bg_levels + [loudness_db(pcm)])[-40:]
                 return ""
         if self.mlx:
-            res = self.mlx.transcribe(
-                audio, path_or_hf_repo=self.full_path, language="en", temperature=0.0,
-                condition_on_previous_text=False, no_speech_threshold=0.5, initial_prompt=ADDRESS_HINT)
+            res = None
+            thr = getattr(config, "FAST_ACCEPT_LOGPROB", None)
+            if thr is not None and getattr(self, "screen_model", None):
+                # The small model takes ~0.15 s, the big one ~1.2 s (it always encodes 30 s of audio).
+                # With the name prompt the small one is nearly as accurate, and it knows when it's
+                # unsure (measured: when this confident, 3.9% word errors vs 4.4% for the big one).
+                fast = self.mlx.transcribe(
+                    audio, path_or_hf_repo=self.screen_model, language="en", temperature=0.0,
+                    condition_on_previous_text=False, no_speech_threshold=0.5, initial_prompt=ADDRESS_HINT)
+                segs = fast.get("segments", [])
+                fast_text = fast.get("text", "").strip()
+                if segs and fast.get("text", "").strip() and all(
+                        s.get("avg_logprob", -9) >= thr and s.get("no_speech_prob", 1) < 0.3
+                        and s.get("compression_ratio", 9) <= 2.0 for s in segs):
+                    res = fast
+                    log.info("timing: quick model was sure enough, skipped the big one")
+            if res is None:
+                res = self.mlx.transcribe(
+                    audio, path_or_hf_repo=self.full_path, language="en", temperature=0.0,
+                    condition_on_previous_text=False, no_speech_threshold=0.5, initial_prompt=ADDRESS_HINT)
             kept, dropped = [], []
             for s in res.get("segments", []):
                 if s.get("no_speech_prob", 0) > 0.55 or s.get("avg_logprob", 0) < -0.9 or s.get("compression_ratio", 1) > 2.2:
@@ -207,6 +244,8 @@ class Ears:
             if dropped:
                 log.info("dropped low-confidence speech: %r", " / ".join(dict.fromkeys(dropped))[:160])
             text = _dedupe(" ".join(kept).strip())
+            if fast_text and res is not fast and text and difflib.SequenceMatcher(None, fast_text.lower(), text.lower()).ratio() < 0.85:
+                self.alt = fast_text
             # A lone "Mike" is so short the big model sometimes returns nothing for it.
             # If the quick pass heard just the name (optionally "hey/ok/yo"), trust it.
             if len(text.split()) <= 2 and not self.wake_re.search(text) and re.fullmatch(r"(hey|hi|ok|okay|yo)?[\s,]*" + self.wake_re.pattern + r"[\s.!?,]*", qtext, re.I):
