@@ -56,6 +56,12 @@ RANK = [("groq", "openai/gpt-oss-120b"), ("nvidia", "nvidia/nemotron-3-ultra"), 
         ("nvidia", "deepseek-ai/deepseek-v3"), ("openrouter", "google/gemma-4-31b"), ("gemini", "gemini-2.5-flash")]
 
 
+def _size(model: str) -> float:
+    """Parameter count in billions read from the model id ("gpt-oss-20b" -> 20); unknown sizes sort last."""
+    m = re.search(r"(\d+(?:\.\d+)?)b\b", model.lower())
+    return float(m.group(1)) if m else 1e9
+
+
 def _rank(pid: str, model: str, fallback: int) -> int:
     return next((i for i, (rp, rm) in enumerate(RANK) if rp == pid and model.startswith(rm)), 100 + fallback)
 
@@ -368,9 +374,28 @@ class FallbackBrain:
         if not providers:
             raise RuntimeError("No backup model is set up. Add a free key in Settings > Model.")
         system = backup_system_prompt()
-        note = await self._skill_for(self._request_text())
-        if note:
-            system += "\n\n" + note
+        # The skill router runs alongside the answer, not before it: most requests need no skill, and
+        # those shouldn't wait for it. If it picks one before anything was said or done, restart with it.
+        self._acted = False
+        mark = len(self.history)
+        route = asyncio.create_task(self._skill_for(self._request_text()))
+        answer = asyncio.create_task(self._answer(providers, system))
+        try:
+            await asyncio.wait({route, answer}, return_when=asyncio.FIRST_COMPLETED)
+            if not answer.done():
+                note = route.result() if route.done() and not route.exception() else ""
+                if note and not self._acted:
+                    answer.cancel()
+                    await asyncio.gather(answer, return_exceptions=True)
+                    del self.history[mark:]
+                    answer = asyncio.create_task(self._answer(providers, system + "\n\n" + note))
+            return await answer
+        finally:
+            for t in (route, answer):
+                if not t.done():
+                    t.cancel()
+
+    async def _answer(self, providers: list[dict], system: str) -> str:
         last_err = None
         async with httpx.AsyncClient(timeout=httpx.Timeout(60, connect=6)) as client:
             lanes = []
@@ -398,7 +423,7 @@ class FallbackBrain:
                         self.failed_until[p["id"]] = time.time() + 300
         raise RuntimeError(f"All backup models are unavailable right now ({last_err or 'none reachable'}).")
 
-    async def ask(self, system: str, user: str, max_tokens: int = 300) -> str | None:
+    async def ask(self, system: str, user: str, max_tokens: int = 300, small: bool = False) -> str | None:
         """One quick question (no tools) to the best free model that answers within seconds.
         Costs no Claude usage. None if no free model could answer."""
         providers = self.available()
@@ -410,6 +435,10 @@ class FallbackBrain:
                 if await self.resolve_model(client, p):
                     lanes += [(p, m) for m in self.lanes(p)]
             lanes.sort(key=lambda pm: _rank(pm[0]["id"], pm[1], len(lanes)))
+            if small:
+                # A short yes/no-style question: the smallest model answers fastest, and using it
+                # leaves the big one's per-minute allowance for the real answer.
+                lanes.sort(key=lambda pm: _size(pm[1]))
             for p, model in lanes[:3]:
                 key = load_keys().get(p["id"], "")
                 body = {"model": model, "temperature": 0, "max_tokens": max_tokens,
@@ -434,7 +463,7 @@ class FallbackBrain:
             return ""
         listing = "\n".join(f"{s['name']}: {' '.join(s['description'].split())[:100]}" for s in idx.values())
         try:
-            out = await asyncio.wait_for(self.ask(ROUTER_SYSTEM, f"Skills:\n{listing}\n\nUser request: {request[:400]}", 200), 10)
+            out = await asyncio.wait_for(self.ask(ROUTER_SYSTEM, f"Skills:\n{listing}\n\nUser request: {request[:400]}", 200, small=True), 10)
         except Exception:
             return ""
         name = (out or "").strip().splitlines()[0].strip(" .`'\"*").lower() if (out or "").strip() else ""
@@ -489,6 +518,7 @@ class FallbackBrain:
                     if not piece:
                         return
                 text += piece
+                self._acted = True
                 await self.on_delta(piece)
 
             try:
@@ -616,6 +646,7 @@ class FallbackBrain:
                 args = {}
         except json.JSONDecodeError:
             return "Arguments weren't valid JSON; try again."
+        self._acted = True
         tool_name = {"run_command": "Bash", "write_file": "Write"}.get(name, name)
         perm_args = {"file_path": args.get("path", "")} if name == "write_file" else args
         await self.on_tool(tool_name, args)

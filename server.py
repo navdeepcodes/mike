@@ -304,6 +304,9 @@ class Mike:
             await self.set_state("speaking")
             await self.send({"type": "audio", "gen": gen, "text": text,
                              "data": base64.b64encode(wav).decode()})
+            if getattr(self, "t_heard", None):
+                log.info("timing: heard → first sound %.2fs", time.time() - self.t_heard)
+                self.t_heard = None
 
     async def interrupt(self):
         self.auto = None          # you spoke or said stop: whatever he was carrying on with ends
@@ -622,6 +625,7 @@ class Mike:
 
     async def on_utterance(self, text: str, mic: bool = False):
         log.info("heard: %s", text)
+        self.t_heard = time.time()      # for the "heard → first sound" timing in speech_worker
         self.voice_score = None
         woke, command = split_wake(text)
         if mic and woke and self.ears.is_near(self.ears.last_db):

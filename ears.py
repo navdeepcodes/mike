@@ -27,6 +27,10 @@ MAX_SECONDS = 30
 # Tells Whisper the name exists without making it think the name was already said
 # (a prompt like "Hey Mike." makes it skip the name in "Hey Mike, open...").
 WAKE_HINT = f"Glossary: {config.NAME} (the assistant's name)."
+# For the accurate model: a few short requests that start with the name, so it spells "Mike," as a
+# name and not "My," / "Mic," / "Might" (measured: word errors on clean speech 10% -> 3%, with
+# room chatter behind 29% -> 5%). Filtered below like any other segment, so noise can't pass as speech.
+ADDRESS_HINT = f"{config.NAME}, what time is it? {config.NAME}, play some music. Hey {config.NAME}, open Safari."
 
 # Whisper invents these from noise; ignore them when they are the whole utterance.
 HALLUCINATIONS = {"", "you", "thank you", "thanks for watching", "thank you for watching",
@@ -144,11 +148,13 @@ class Ears:
                     log.info("skipped a clip before transcribing (%.0f dB, not your voice)", self.last_db)
                     self.bg_levels = (self.bg_levels + [self.last_db])[-40:]
                     continue
+            t0 = time.time()
             try:
                 text = await loop.run_in_executor(None, self._transcribe, pcm, attentive)
             except Exception:
                 log.exception("transcription failed")
                 continue
+            log.info("timing: transcribed %.1fs of speech in %.2fs", len(pcm) / (RATE * 2), time.time() - t0)
             if text and text.lower().strip(" .,!?") not in HALLUCINATIONS:
                 if self.wake_re.search(text):
                     self.wake_level = self.last_db if self.wake_level is None else 0.7 * self.wake_level + 0.3 * self.last_db
@@ -170,6 +176,8 @@ class Ears:
         audio = np.concatenate([np.zeros(RATE // 4, dtype=np.float32), audio])
         # Auto-gain is off in the mic (so you stand out from the room); level it here for Whisper.
         peak = float(np.max(np.abs(audio))) if len(audio) else 0.0
+        if peak < 0.002:      # no signal at all: with a name-prompt Whisper would invent one from nothing
+            return ""
         if 0.0005 < peak < 0.5:
             audio = audio * (0.5 / peak)
         if self.mlx and not attentive and getattr(self, "screen_model", None):
@@ -189,7 +197,7 @@ class Ears:
         if self.mlx:
             res = self.mlx.transcribe(
                 audio, path_or_hf_repo=self.full_path, language="en", temperature=0.0,
-                condition_on_previous_text=False, no_speech_threshold=0.5)   # no prompt: it leaks into noisy audio
+                condition_on_previous_text=False, no_speech_threshold=0.5, initial_prompt=ADDRESS_HINT)
             kept, dropped = [], []
             for s in res.get("segments", []):
                 if s.get("no_speech_prob", 0) > 0.55 or s.get("avg_logprob", 0) < -0.9 or s.get("compression_ratio", 1) > 2.2:
