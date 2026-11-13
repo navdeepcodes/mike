@@ -23,6 +23,7 @@ import httpx
 import config
 import memory
 import mike_tools
+import skills
 
 log = logging.getLogger("mike.fallback")
 SECRETS = config.DATA / "secrets.json"
@@ -77,7 +78,7 @@ def save_key(provider: str, key: str):
 
 
 # ---- tools ----------------------------------------------------------------------
-_ENV = dict(os.environ, PATH="/opt/homebrew/bin:/usr/local/bin:" + os.environ.get("PATH", "/usr/bin:/bin:/usr/sbin:/sbin"))
+_ENV = dict(os.environ, PATH=str(config.ROOT / ".venv" / "bin") + ":/opt/homebrew/bin:/usr/local/bin:" + os.environ.get("PATH", "/usr/bin:/bin:/usr/sbin:/sbin"))
 
 
 def run_command(command: str) -> str:
@@ -95,6 +96,19 @@ def run_command(command: str) -> str:
     return f"Failed (exit code {r.returncode}): {(err or out)[:3000]}"
 
 
+def write_file(path: str, content: str) -> str:
+    """Create or overwrite a text file with the content (makes folders as needed). Use this for code, HTML, CSS
+    and documents instead of shell heredocs."""
+    try:
+        p = os.path.expanduser(path)
+        os.makedirs(os.path.dirname(p) or ".", exist_ok=True)
+        with open(p, "w") as fh:
+            fh.write(content)
+        return f"Wrote {len(content)} characters to {path}."
+    except Exception as e:
+        return f"Couldn't write it: {e}"
+
+
 def read_file(path: str) -> str:
     """Read a text file from the user's Mac (first 20,000 characters)."""
     try:
@@ -107,7 +121,7 @@ def read_file(path: str) -> str:
 # Mike's own tools, minus the image ones (most free models are text-only: read apps with `ui`).
 # (The everyday set only: every tool description costs tokens against the free per-minute limits.)
 TOOL_FUNCS = {f.__name__: f for f in [
-    run_command, read_file,
+    run_command, read_file, write_file, mike_tools.find_skill, mike_tools.use_skill,
     mike_tools.ui, mike_tools.press, mike_tools.set_text, mike_tools.menu, mike_tools.type_text,
     mike_tools.press_key, mike_tools.media,
     mike_tools.set_reminder, mike_tools.list_reminders, mike_tools.cancel_reminder,
@@ -159,6 +173,13 @@ Recipes:
   matching "Play ..." button (not the bottom bar). For a vibe ("something nice"), search a playlist like "chill vibes".
   Pause/next: ui(app="Spotify", find="Pause"/"Next") and press. media keys are only a fallback.
 - Never change the Mac's microphone input volume or system mic settings, even if asked to mute or silence the mic: Mike's own mute handles that, and zeroing the system mic leaves him deaf. Speaker/output volume is fine.
+- Act first, talk last: don't narrate steps or ask what looking would answer; do it, check it, then say one short
+  sentence. Never state what you haven't verified from a tool result this step; if unsure, look again or say so.
+- Finish what you start: for multi-step or ongoing tasks keep working (look, act, check) until it is really done.
+- Making a PDF, document, slides, spreadsheet, image, simulation, animation or website: if a skill is already loaded
+  for this request ("A skill applies" below), follow it; otherwise call find_skill first, then use_skill with the best
+  match and follow it. Skills make the result far better. Write files with write_file (not shell heredocs), run scripts with run_command
+  (python3), check the file exists, then open it. Save in ~/Documents/Mike unless told otherwise.
 - Volume: run_command osascript -e "set volume output volume 40".
 - Weather: run_command curl -s "wttr.in/?format=%l:+%C+%t". Battery: pmset -g batt.
 - Files: mdfind -name "..." or mdfind "kind:pdf topic"; read PDFs with pdftotext FILE - | head -200.
@@ -190,7 +211,36 @@ CLAIM_RE = re.compile(r"\b(playing|set|done|opened|started|turned|sent|added|sch
                       r"launched|queued|cued|changed|moved|deleted|switched|saved|written|on it|open|on|up)\b", re.I)
 NUDGE_ACT = ("(Check: you haven't called any tool this turn, so nothing has actually happened. Use the tools now to "
              "really do it, then reply. If you can't do it, say so honestly.)")
+NUDGE_FILE = ("(Check: {name} doesn't exist yet, so the task isn't done and you must not say it is. Look at what your last "
+              "command printed, fix the problem, then build it now: write the code with write_file, run it with run_command, "
+              "and check the file exists.)")
+ROUTER_SYSTEM = (
+    "You route a voice assistant's requests. You get the user's request and a list of skills (ready-made know-how for "
+    "making things). Reply with the single skill name that would clearly make the result better, or NONE if no skill is "
+    "needed (chat, questions, simple commands, opening apps, music, reminders, settings). Reply with only the name or NONE.")
 NUDGE_SAY = "(Now reply to the user in one short spoken sentence: what happened?)"
+
+
+def _targets(request: str) -> list[str]:
+    """Files or folders named in the request that don't exist yet: they're what has to exist when he's done."""
+    out = []
+    for raw in re.findall(r"(?:~|/)[^\s'\"<>|,;]*[\w/]", request):
+        p = os.path.expanduser(raw)
+        if p.count("/") >= 2 and not os.path.exists(p) and p not in out:
+            out.append(p)
+    return out
+
+
+def _missing(paths: list[str]) -> list[str]:
+    bad = []
+    for p in paths:
+        if (p.endswith("/") or "." not in os.path.basename(p)):        # a folder: must exist and hold something
+            ok = os.path.isdir(p) and any(os.scandir(p))
+        else:
+            ok = os.path.isfile(p) and os.path.getsize(p) > 0
+        if not ok:
+            bad.append(p)
+    return bad
 
 
 class _ProviderDown(Exception):
@@ -318,6 +368,9 @@ class FallbackBrain:
         if not providers:
             raise RuntimeError("No backup model is set up. Add a free key in Settings > Model.")
         system = backup_system_prompt()
+        note = await self._skill_for(self._request_text())
+        if note:
+            system += "\n\n" + note
         last_err = None
         async with httpx.AsyncClient(timeout=httpx.Timeout(60, connect=6)) as client:
             lanes = []
@@ -345,6 +398,51 @@ class FallbackBrain:
                         self.failed_until[p["id"]] = time.time() + 300
         raise RuntimeError(f"All backup models are unavailable right now ({last_err or 'none reachable'}).")
 
+    async def ask(self, system: str, user: str, max_tokens: int = 300) -> str | None:
+        """One quick question (no tools) to the best free model that answers within seconds.
+        Costs no Claude usage. None if no free model could answer."""
+        providers = self.available()
+        if not providers:
+            return None
+        async with httpx.AsyncClient(timeout=httpx.Timeout(9, connect=4)) as client:
+            lanes = []
+            for p in providers:
+                if await self.resolve_model(client, p):
+                    lanes += [(p, m) for m in self.lanes(p)]
+            lanes.sort(key=lambda pm: _rank(pm[0]["id"], pm[1], len(lanes)))
+            for p, model in lanes[:3]:
+                key = load_keys().get(p["id"], "")
+                body = {"model": model, "temperature": 0, "max_tokens": max_tokens,
+                        "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}]}
+                if p["id"] == "groq" and "gpt-oss" in model:
+                    body["reasoning_effort"] = "low"
+                try:
+                    r = await client.post(f"{p['base']}/chat/completions", json=body,
+                                          headers={"Authorization": f"Bearer {key}"} if key else {})
+                    r.raise_for_status()
+                    text = ((r.json().get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+                    if text.strip():
+                        return text.strip()
+                except Exception as e:
+                    log.info("quick question to %s %s failed (%s)", p["name"], model, str(e)[:80])
+        return None
+
+    async def _skill_for(self, request: str) -> str:
+        """If a skill would clearly help with this request, its instructions (chosen by a quick free model)."""
+        idx = skills.index()
+        if not idx or len(request.split()) < 3:
+            return ""
+        listing = "\n".join(f"{s['name']}: {' '.join(s['description'].split())[:100]}" for s in idx.values())
+        try:
+            out = await asyncio.wait_for(self.ask(ROUTER_SYSTEM, f"Skills:\n{listing}\n\nUser request: {request[:400]}", 200), 10)
+        except Exception:
+            return ""
+        name = (out or "").strip().splitlines()[0].strip(" .`'\"*").lower() if (out or "").strip() else ""
+        if name not in idx:
+            return ""
+        log.info("skill picked for this request: %s", name)
+        return "A skill applies to this request. Follow it:\n" + skills.load(name)
+
     async def _loop(self, client, p, model, system) -> str:
         """Model ↔ tools until it answers in text (max 10 rounds)."""
         key = load_keys().get(p["id"], "")
@@ -357,10 +455,12 @@ class FallbackBrain:
 
     async def _rounds(self, client, p, model, system, headers, request, seen, per_tool, nudged) -> str:
         said, used_tool = "", False
-        for _ in range(10):
+        targets = _targets(request)
+        for _ in range(16):
             # An action request with no tool used yet: hold the words back until we know they're true.
-            hold = not used_tool and bool(ACTION_RE.search(request)) and "act" not in nudged
-            body = {"model": model, "stream": True, "tools": TOOLS, "temperature": 0.4, "max_tokens": 1200,
+            hold = (not used_tool and bool(ACTION_RE.search(request)) and "act" not in nudged) or bool(_missing(targets))
+            body = {"model": model, "stream": True, "tools": TOOLS, "temperature": 0.4, "max_tokens": 1200 if p["id"] == "groq" else 4000,   # reasoning models spend part of it thinking
+                    
                     "messages": [{"role": "system", "content": system + self._now_note()}] + self._payload_history()}
             if p["id"] == "groq" and "gpt-oss" in model:
                 body["reasoning_effort"] = "medium"     # think a little before acting: far fewer silly moves
@@ -426,6 +526,7 @@ class FallbackBrain:
                 head["done"] = True
                 await emit("")
             if not calls:
+                log.info("backup reply with no tool call: %r", text[:160])
                 if hold and text.strip() and (CLAIM_RE.search(text) or not text.rstrip().endswith("?")):
                     # Claimed it did something without touching a tool: make it actually do it.
                     nudged.add("act")
@@ -433,6 +534,20 @@ class FallbackBrain:
                     self.history += [{"role": "assistant", "content": text, "nudge": True},
                                      {"role": "user", "content": NUDGE_ACT, "nudge": True}]
                     continue
+                gone = _missing(targets)
+                if gone:
+                    tries = sum(1 for n in nudged if n.startswith("file"))
+                    if tries < 2:
+                        nudged.add(f"file{tries}")
+                        log.info("backup stopped but %s isn't there; sending it back (%d)", gone[0], tries + 1)
+                        if text.strip():
+                            self.history.append({"role": "assistant", "content": text, "nudge": True})
+                        self.history.append({"role": "user", "content": NUDGE_FILE.format(name=os.path.basename(gone[0])), "nudge": True})
+                        continue
+                    msg = f"I couldn't finish that one. {os.path.basename(gone[0])} isn't there."
+                    await self.on_delta(msg)
+                    self.history.append({"role": "assistant", "content": msg})
+                    return said + msg
                 if hold and text:
                     await self.on_delta(text)
                 if not (said + text).strip() and "say" not in nudged:
@@ -456,7 +571,7 @@ class FallbackBrain:
                 if sig in seen:
                     result = (f"You already ran exactly this a moment ago; it returned: {seen[sig][:300]}. "
                               "Don't repeat it. Take a different next step, or tell the user what happened.")
-                elif per_tool[c["name"]] > 5:
+                elif per_tool[c["name"]] > 8:
                     result = "That's too many tries with this tool. Stop and tell the user honestly where things stand."
                 else:
                     result = await self._call(c["name"], c["args"])
@@ -501,9 +616,10 @@ class FallbackBrain:
                 args = {}
         except json.JSONDecodeError:
             return "Arguments weren't valid JSON; try again."
-        tool_name = "Bash" if name == "run_command" else name
+        tool_name = {"run_command": "Bash", "write_file": "Write"}.get(name, name)
+        perm_args = {"file_path": args.get("path", "")} if name == "write_file" else args
         await self.on_tool(tool_name, args)
-        allowed = await self.on_permission(tool_name, args)   # sensitive shell commands still ask you
+        allowed = await self.on_permission(tool_name, perm_args)   # sensitive shell commands still ask you
         if allowed is not True:
             return allowed if isinstance(allowed, str) else "The user declined this action."
         try:

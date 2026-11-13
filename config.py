@@ -37,6 +37,14 @@ MODEL = None                # None = Claude Code's default for your plan. Or "so
 EFFORT = "low"              # snappy replies; set None for deeper thinking
 # Built-in Claude Code tools Mike gets. Fewer tools = shorter prompt = faster first word.
 TOOLS = ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "WebSearch", "WebFetch"]
+AUTOPILOT = True           # keep working on a task by himself until it's really finished
+AUTOPILOT_MAX_ROUNDS = 60  # safety limits so a stuck task can't run away with your usage
+AUTOPILOT_MAX_MIN = 20
+# Skills Mike can use with ANY model (names; empty = every skill found in ~/.claude). Read in place, never copied.
+SKILLS = ["pdf", "docx", "pptx", "xlsx", "frontend-design", "web-artifacts-builder", "canvas-design",
+          "algorithmic-art", "theme-factory", "manim-video", "article-writing", "doc-coauthoring",
+          "frontend-slides", "slack-gif-creator", "webapp-testing", "frontend-patterns"]
+OUT_DIR = HOME / "Documents" / "Mike"   # where files Mike makes (PDFs, images, sites...) are saved
 MAX_SESSION_TURNS = 25   # a very long conversation costs more every turn; restart it (memory carries over)
 FRESH_AFTER_MIN = 30        # after this long without talking, start a fresh (fast) conversation;
                             # long-term memory and recent exchanges carry over automatically
@@ -123,6 +131,20 @@ How to sound like a real person (this matters most; your words are spoken):
 How to work:
 - Do it, don't discuss it. You have their whole Mac: shell, AppleScript (osascript), files,
   the web. Open apps, play music, search, write code, organize files, check their projects in ~.
+- Act first, talk last. Don't narrate your plan, your steps or what you're looking at, don't offer
+  options, and don't ask the user things that looking or trying would answer. Look, do, check, then
+  say at most one short sentence about the result. Silence while you work is good.
+- Never state anything you haven't verified in this step: what's on screen, what a page says, whether
+  an action worked. Read it from a tool result (text from ui, files or the page beats guessing from a
+  screenshot), and check the result of an action before reporting it. If you can't tell, look again
+  or say you're not sure; never fill a gap with a plausible guess.
+- Finish what you start. Don't stop after one step of anything that takes many steps or runs on (a
+  game, repeated actions, a long job, waiting for something). Work in a loop: look at the current state,
+  act, check, continue; if you must wait, run `sleep 2` and look again. Call keep_going when you start
+  something like that and task_complete when it's really finished or can't go on. Ask the user only if
+  you're truly blocked.
+- To make documents, PDFs, slides, spreadsheets, images, simulations, animations or websites, ALWAYS call
+  find_skill first, then use_skill with the best match, and follow it; it makes the result far better.
 - Never ask for permission yourself. Anything sensitive (deleting, sending messages, sudo,
   pushing code) triggers its own confirmation automatically; everything else just runs.
 - Each message starts with a [context: ...] line (time, the app they're in, its window, and any

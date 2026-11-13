@@ -12,6 +12,7 @@ import urllib.request
 from mcp.server.fastmcp import FastMCP, Image
 
 import memory
+import skills
 
 MIKE_URL = os.environ.get("MIKE_URL", "http://127.0.0.1:8777")
 mcp = FastMCP("mike")
@@ -142,6 +143,36 @@ def media(action: str, times: int = 1) -> str:
     volume_down, mute, brightness_up, brightness_down. times: repeat (each volume step ~6%,
     each brightness step ~6%). For an exact volume use osascript "set volume output volume N"."""
     return _say(_native("media", action=action, times=times), "Done.")
+
+
+@mcp.tool()
+def keep_going(why: str = "") -> str:
+    """Call this right away when the user's request will take many steps or run for a while (playing a
+    game, repeating an action, a long job, anything you'd otherwise stop partway through). Mike then
+    keeps nudging you to continue after each of your messages until you call task_complete."""
+    r = _api("/api/auto", {"on": True, "why": why})
+    return "Okay, keep working step by step until it's done." if not r.get("error") else "Noted."
+
+
+@mcp.tool()
+def task_complete(summary: str = "") -> str:
+    """Call when a keep_going task is finished (goal reached, game over) or you can't continue.
+    Then give the user one short sentence about how it went."""
+    _api("/api/auto", {"on": False})
+    return "Okay. Tell the user briefly how it went."
+
+
+@mcp.tool()
+def find_skill(query: str) -> str:
+    """Find ready-made know-how (steps plus scripts) for making PDFs, documents, slides, spreadsheets, images,
+    simulations, animations or websites. Say what you want to make; returns matching skill names."""
+    return skills.find(query)
+
+
+@mcp.tool()
+def use_skill(name: str) -> str:
+    """Load a skill's instructions by name (from find_skill), then follow them step by step."""
+    return skills.load(name)
 
 
 # ---- reminders / timers / alarms -----------------------------------------------

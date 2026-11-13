@@ -3,6 +3,7 @@
 Run:  ./run.sh   then open http://127.0.0.1:8765
 """
 import asyncio
+import difflib
 import base64
 import json
 import logging
@@ -176,6 +177,11 @@ class Mike:
         self.turn_reply: list[str] = []
         self.turn_no = 0
         self.session_turns = 0
+        self.auto: dict | None = None      # a task Mike is carrying on with by himself
+        self.round_tools = 0               # tools used in the current round
+        self.auto_done_flag = False        # the brain said task_complete
+        self.held: list[str] = []          # words held back while he works on his own
+        self.last_auto_said = ""
         self.recent_said: list[str] = []
         self.script_ok: dict[str, bool] = {}     # apps macOS already lets Mike script
         self.ducked = False
@@ -300,6 +306,8 @@ class Mike:
                              "data": base64.b64encode(wav).decode()})
 
     async def interrupt(self):
+        self.auto = None          # you spoke or said stop: whatever he was carrying on with ends
+        self.held = []
         self.gen += 1
         self.splitter = SentenceSplitter()
         while not self.speech_q.empty():
@@ -338,6 +346,9 @@ class Mike:
     async def on_delta(self, text: str):
         self.turn_reply.append(text)
         await self.send({"type": "assistant_delta", "text": text})
+        if self.auto is not None or self.turn_user.startswith("("):
+            self.held.append(text)          # working on his own: don't narrate every step aloud
+            return
         for sentence in self.splitter.push(text):
             self.say(sentence)
         # The last sentence has no text after it, so don't wait for the whole turn to end:
@@ -353,7 +364,7 @@ class Mike:
             asyncio.create_task(flush_soon())
 
     ACKS = ["On it.", "Sure, one sec.", "Yep, give me a sec.", "Okay, on it.", "Got it, hang on.", "One sec."]
-    QUIET_TOOLS = {"remember", "update_memory", "forget"}
+    QUIET_TOOLS = {"remember", "update_memory", "forget", "keep_going", "task_complete"}
 
     async def _ack_later(self, turn: int):
         """If a task runs a while with nothing said yet, say a quick 'on it' like a person would."""
@@ -363,6 +374,7 @@ class Mike:
             self.say(random.choice(self.ACKS))
 
     async def on_tool(self, name: str, inp: dict):
+        self.round_tools += 1
         # Text before a tool and text after it arrive glued together ("...at the top.Spotify's on").
         # Close off what was said so far as its own sentence.
         if self.turn_reply and not "".join(self.turn_reply).endswith((" ", "\n")):
@@ -397,6 +409,15 @@ class Mike:
         for sentence in self.splitter.flush():
             self.say(sentence)
         self.splitter = SentenceSplitter()
+        held, self.held = "".join(self.held).strip(), []
+        if held and not info.get("interrupted"):
+            # Only the concluding sentence, and never a near-repeat of what he said last round.
+            last = [p for p in re.split(r"(?<=[.!?])\s+", held) if p.strip()][-1]
+            if difflib.SequenceMatcher(None, last.lower(), self.last_auto_said.lower()).ratio() < 0.55:
+                self.say(last)
+                self.last_auto_said = last
+        user_text = self.turn_user
+        said = "".join(self.turn_reply).strip()
         if self.turn_user:
             reply = "".join(self.turn_reply).strip() or ("(interrupted)" if info.get("interrupted") else "")
             try:
@@ -415,10 +436,83 @@ class Mike:
             else:
                 self.say("Sorry, something went wrong on my end.")
             await self.on_log(f"error: {info['error']}")
+        if await self._maybe_continue(info, user_text, said):
+            return
         # If nothing is queued to speak, go straight to follow-up listening.
         await asyncio.sleep(0.05)
         if self.speech_q.empty() and self.state != "speaking":
             await self.on_drained(self.gen)
+
+    JUDGE_SYSTEM = (
+        "You check the work of a voice assistant that can operate the user's computer. You get the user's "
+        "request and the assistant's last message after it did some actions. Decide whether the request is "
+        "fully accomplished, or the assistant stopped with work still left that it could keep doing by itself: "
+        "it did only one step of something with many steps or that keeps going, it said it will wait, watch, "
+        "check back or continue, or the activity the user asked for isn't over. If it needs an answer or a "
+        "decision from the user, or it cannot go on, that counts as finished. Reply with exactly one word: "
+        "DONE or CONTINUE.")
+
+    async def _is_finished(self, goal: str, said: str) -> bool | None:
+        """Ask a quick free model whether the job is over. None if it couldn't be asked."""
+        try:
+            out = await asyncio.wait_for(self.backup.ask(
+                self.JUDGE_SYSTEM, f"User request: {goal[:400]}\nAssistant's last message: {said[:500] or '(said nothing)'}"), 10)
+        except Exception:
+            return None
+        if not out:
+            return None
+        word = out.strip().upper()
+        log.info("job check: %s", word[:40])
+        if "CONTINUE" in word and "DONE" not in word.split("CONTINUE")[0]:
+            return False
+        return True if "DONE" in word else None
+
+    async def _maybe_continue(self, info: dict, user_text: str, said: str) -> bool:
+        """He stopped. If he was mid-task (he said so, or he worked and went silent), send him back in."""
+        tools, self.round_tools = self.round_tools, 0
+        flagged_done, self.auto_done_flag = self.auto_done_flag, False
+        if (not config.AUTOPILOT or info.get("interrupted") or info.get("error") or self.pending_confirm
+                or flagged_done):
+            self.auto = None
+            return False
+        if not tools or said.endswith("?"):      # he didn't act this round, or he's asking you something
+            self.auto = None
+            return False
+        a = self.auto
+        goal = a["goal"] if a else user_text
+        if not goal or goal.startswith("("):
+            return False
+        finished = await self._is_finished(goal, said)
+        if finished is None:
+            # Nobody to ask: he keeps going only if he declared it, or worked and then said nothing.
+            finished = not a and bool(said)
+        if finished:
+            self.auto = None
+            return False
+        if a is None:
+            a = self.auto = {"goal": goal, "rounds": 0, "t0": time.time()}
+        if a["rounds"] >= config.AUTOPILOT_MAX_ROUNDS or time.time() - a["t0"] > config.AUTOPILOT_MAX_MIN * 60:
+            self.auto = None
+            self.say("I've been at this a while, so I'll pause here. Tell me to keep going if you want more.")
+            return False
+        a["rounds"] += 1
+        log.info("carrying on by himself (round %d, %d tools last round): %s", a["rounds"], tools, a["goal"][:80])
+        prompt = (f"[Auto-continue {a['rounds']}/{config.AUTOPILOT_MAX_ROUNDS}] Continue the user's task: "
+                  f"\"{a['goal'][:300]}\". Check the current state with your tools, do the next step, and keep "
+                  "going. If you're waiting on something outside your control, run `sleep 8` before you look again. "
+                  "Say nothing unless there is a result, a problem, or you need them. When it's finished or "
+                  "you can't go on, call task_complete and say one short sentence.")
+        self.turn_user, self.turn_reply = f"(auto-continue {a['rounds']}) {a['goal'][:60]}", []
+        self.turn_no += 1
+        self.acked, self.retried, self.turn_prompt = True, False, prompt
+        await self.set_state("thinking")
+        try:
+            await (self.backup if self.active is self.backup else self.brain).send(prompt)
+        except Exception:
+            log.exception("auto-continue failed")
+            self.auto = None
+            return False
+        return True
 
     async def on_permission(self, tool: str, inp: dict) -> bool | str:
         # AppleScript aimed at an app Mike isn't allowed to script yet would pop a macOS dialog and
@@ -572,6 +666,11 @@ class Mike:
             await self.handle_command(text, allow_quit=False)
             return
 
+        if self.auto and not woke and STOP.match(text) and ((not mic) or await self.is_you()):
+            await self.interrupt()
+            self.say("Okay, stopping.")
+            return
+
         in_followup = self.state == "listening" and time.time() < self.followup_until + 1.5
         if woke and not config.WAKE_WORD and not in_followup and self.state != "speaking":
             return   # wake word turned off in Settings: only ⌥Space, the pet or typing start Mike
@@ -678,6 +777,7 @@ class Mike:
             return
         if await self.try_local(command):
             return
+        self.auto, self.round_tools, self.auto_done_flag = None, 0, False
         self.followup_until = 0
         await self.set_state("thinking")
         await self.send({"type": "user", "text": command})
@@ -1117,6 +1217,19 @@ async def api_show():
 async def api_hide():
     """Put Mike's window away (he keeps listening through the pet)."""
     await mike.send({"type": "hide"})
+    return {"ok": True}
+
+
+@app.post("/api/auto")
+async def api_auto(request: Request):
+    b = await request.json()
+    if b.get("on"):
+        if mike.auto is None and config.AUTOPILOT:
+            goal = mike.turn_user if mike.turn_user and not mike.turn_user.startswith("(") else "the current task"
+            mike.auto = {"goal": goal, "rounds": 0, "t0": time.time(), "idle": 0}
+    else:
+        mike.auto = None
+        mike.auto_done_flag = True
     return {"ok": True}
 
 

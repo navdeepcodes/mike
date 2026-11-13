@@ -9,3 +9,11 @@ kokoro-onnx>=0.4          # Mike's voice
 mcp>=1.2,<2               # Mike's tools for Claude Code
 websockets>=12            # test scripts talk to Mike over /ws
 sherpa-onnx
+reportlab
+pypdf
+pillow
+matplotlib
+python-docx
+openpyxl
+python-pptx
+markdown
