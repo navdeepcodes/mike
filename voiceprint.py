@@ -91,6 +91,15 @@ class VoicePrint:
         score = self.similarity(v)
         return score >= self.threshold(), score
 
+    def score(self, pcm: bytes) -> tuple[float, float] | None:
+        """(how much it sounds like you, the bar for 'you'), or None when that can't be told (no print yet, clip too short)."""
+        if not self.ready:
+            return None
+        v = self.embed(pcm)
+        if v is None:
+            return None
+        return self.similarity(v), self.threshold()
+
     def maybe_user(self, pcm: bytes) -> bool:
         """Lenient: False only when the clip clearly isn't you (TV, other people, noise).
         Used to skip noise before the slow speech model; the strict check still runs later."""

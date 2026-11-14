@@ -30,7 +30,8 @@ function mood(now) {
   return "idle";
 }
 function wantVisible(now) {
-  if (S.dismissed) return false;     // sent away by voice; comes back the next time he's called
+  if (S.dismissed) return false;
+  if (S.windowActive && S.mode !== "always") return false;   // you are working in the Mike window: the pet stays out of the way     // sent away by voice; comes back the next time he's called
   if (S.mode === "off") return now < S.summonUntil;
   if (S.mode === "always") return true;
   return ACTIVE.has(S.state) || now < S.lingerUntil || now < S.summonUntil;
@@ -52,6 +53,7 @@ function hop() { wrap.classList.remove("hop", "pop"); void wrap.offsetWidth; wra
 
 // ---------------------------------------------------------------- speech bubble
 function showBubble(kind, k, t, h = "", holdMs = 0) {
+  if (S.windowActive) return;                                 // the window shows it already; no talking over your work
   bubble.className = `bubble show ${kind}`;
   kicker.textContent = k || ""; text.textContent = t || ""; hint.textContent = h || "";
   clearTimeout(S.bubbleTimer);
@@ -78,7 +80,7 @@ function handle(m) {
   const now = performance.now();
   switch (m.type) {
     case "hello":
-      S.state = m.state || "idle"; S.present = m.present; S.main = m.main;
+      S.state = m.state || "idle"; S.present = m.present; S.main = m.main; S.windowActive = !!m.window;
       setPetLocal(m.pet, m.mode);
       break;
     case "pet":
@@ -115,6 +117,10 @@ function handle(m) {
       break;
     case "presence":
       S.present = m.present;
+      break;
+    case "window_active":
+      S.windowActive = !!m.on;
+      if (S.windowActive) hideBubble();
       break;
     case "pet_dismiss":
       S.dismissed = !!m.on;

@@ -162,6 +162,84 @@ def task_complete(summary: str = "") -> str:
     return "Okay. Tell the user briefly how it went."
 
 
+# ---- building software: terminals, projects, and Mike building Mike ---------------------------------
+@mcp.tool()
+def terminal_start(name: str = "main", command: str = "", cwd: str = "") -> str:
+    """Start a terminal session that keeps running between your messages: a dev server, a test watcher, a build,
+    or (empty command) an interactive shell. It runs in the active project's folder unless cwd is given.
+    Look at what it prints with terminal_read."""
+    return _api("/api/term", {"op": "start", "name": name, "command": command, "cwd": cwd}).get("text", "Couldn't reach Mike.")
+
+
+@mcp.tool()
+def terminal_read(name: str = "main", lines: int = 40, wait: float = 0) -> str:
+    """Read the latest output of a terminal session. wait=N seconds waits for it to print and settle first
+    (use 2 to 10 right after starting or sending something)."""
+    return _api("/api/term", {"op": "read", "name": name, "lines": lines, "wait": wait}).get("text", "Couldn't reach Mike.")
+
+
+@mcp.tool()
+def terminal_send(name: str = "main", text: str = "", enter: bool = True) -> str:
+    """Type into a terminal session (a command into its shell, an answer to a prompt). Then terminal_read."""
+    return _api("/api/term", {"op": "send", "name": name, "text": text, "enter": enter}).get("text", "Couldn't reach Mike.")
+
+
+@mcp.tool()
+def terminal_interrupt(name: str = "main") -> str:
+    """Press Ctrl-C in a terminal session."""
+    return _api("/api/term", {"op": "interrupt", "name": name}).get("text", "Couldn't reach Mike.")
+
+
+@mcp.tool()
+def terminal_stop(name: str = "main") -> str:
+    """End a terminal session and everything running in it."""
+    return _api("/api/term", {"op": "stop", "name": name}).get("text", "Couldn't reach Mike.")
+
+
+@mcp.tool()
+def terminal_list() -> str:
+    """List the terminal sessions and whether they're running."""
+    return _api("/api/term", {"op": "list"}).get("text", "Couldn't reach Mike.")
+
+
+@mcp.tool()
+def terminal_show(name: str = "main") -> str:
+    """Open a terminal session's live output in a Terminal window, when the user wants to watch it."""
+    return _api("/api/term", {"op": "show", "name": name}).get("text", "Couldn't reach Mike.")
+
+
+@mcp.tool()
+def project_find(query: str = "") -> str:
+    """Find a code project on this Mac by the name the user said ("mike", "the tv assistant"). Empty lists the recent ones."""
+    return _api("/api/project", {"op": "find", "query": query}).get("text", "Couldn't reach Mike.")
+
+
+@mcp.tool()
+def project_use(path: str) -> str:
+    """Make a folder the active project (shown in the Code view, and where terminals start). Returns its stack,
+    git state and the commands to run and test it."""
+    return _api("/api/project", {"op": "use", "path": path}).get("text", "Couldn't reach Mike.")
+
+
+@mcp.tool()
+def project_info() -> str:
+    """The active project: stack, git branch and changes, run/test commands."""
+    return _api("/api/project", {"op": "info"}).get("text", "Couldn't reach Mike.")
+
+
+@mcp.tool()
+def self_check() -> str:
+    """After changing Mike's own code (the mike folder), compile everything. 'OK' or exactly what's broken."""
+    return _api("/api/self", {"op": "check"}).get("text", "Couldn't reach Mike.")
+
+
+@mcp.tool()
+def mike_restart() -> str:
+    """Restart Mike so changes to his own code take effect. It checks the code first and refuses if anything is
+    broken. Tell the user first; Mike is gone for under a minute and this conversation continues after."""
+    return _api("/api/self", {"op": "restart"}).get("text", "Couldn't reach Mike.")
+
+
 @mcp.tool()
 def dismiss_pet() -> str:
     """Call when the user tells you to go away, close, be quiet, stop or leave them alone and nothing else was asked.

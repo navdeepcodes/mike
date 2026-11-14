@@ -8,11 +8,13 @@ commands still need your OK).
 Keys live in data/secrets.json (readable only by you): {"groq": "<key>", "nvidia": "<key>", ...}
 """
 import asyncio
+import difflib
 import inspect
 import re
 import json
 import logging
 import os
+import shutil
 import subprocess
 import time
 import typing
@@ -23,6 +25,7 @@ import httpx
 import config
 import memory
 import mike_tools
+import projects
 import skills
 
 log = logging.getLogger("mike.fallback")
@@ -43,7 +46,9 @@ PROVIDERS = [
      "prefer": ["nvidia/nemotron-3-ultra", "google/gemma-4-31b", "nvidia/nemotron-3.5-super", "deepseek", "qwen/qwen3",
                 "openai/gpt-oss-120b", "google/gemma-4-26b", "baidu/ernie-5.5"]},
     {"id": "gemini", "name": "Google Gemini", "base": "https://generativelanguage.googleapis.com/v1beta/openai",
-     "signup": "https://aistudio.google.com/apikey", "prefer": ["gemini-2.5-flash", "gemini-flash-latest", "gemini-2.0-flash"]},
+     "signup": "https://aistudio.google.com/apikey", "prefer": ["gemini-flash-latest"],
+     # Google retires model names every few months: take the newest stable flash models it lists, verified below.
+     "pattern": r"^gemini-(\d+(?:\.\d+)?)-flash(-lite)?$"},
     {"id": "ollama", "name": "Local (Ollama)", "base": "http://127.0.0.1:11434/v1", "signup": "", "local": True,
      "prefer": ["qwen3.5", "qwen3", "llama3", "gemma3", "mistral"]},
 ]
@@ -53,13 +58,21 @@ PROVIDERS = [
 # model, so when its best model is busy we go to another provider's big model, not Groq's smaller ones.
 RANK = [("groq", "openai/gpt-oss-120b"), ("nvidia", "nvidia/nemotron-3-ultra"), ("nvidia", "mistralai/mistral-large-4"),
         ("openrouter", "nvidia/nemotron-3-ultra"), ("groq", "moonshotai/kimi-k2"), ("groq", "qwen/qwen3"),
-        ("nvidia", "deepseek-ai/deepseek-v3"), ("openrouter", "google/gemma-4-31b"), ("gemini", "gemini-2.5-flash")]
+        ("nvidia", "deepseek-ai/deepseek-v3"), ("openrouter", "google/gemma-4-31b"), ("gemini", "gemini-")]
 
 
 def _size(model: str) -> float:
     """Parameter count in billions read from the model id ("gpt-oss-20b" -> 20); unknown sizes sort last."""
     m = re.search(r"(\d+(?:\.\d+)?)b\b", model.lower())
     return float(m.group(1)) if m else 1e9
+
+
+CODE_EXT = (".py", ".js", ".jsx", ".ts", ".tsx", ".html", ".css", ".swift", ".go", ".rs", ".java", ".kt", ".c", ".h", ".cpp", ".rb", ".php", ".sh", ".sql")
+
+
+def _strong(model: str) -> bool:
+    """Not one of the small/lite models (fast, but they make silly mistakes writing code)."""
+    return not re.search(r"lite|mini|nano|small|(?<!\d)(?:3|4|7|8|9|12|14|20)b\b", model.lower())
 
 
 def _rank(pid: str, model: str, fallback: int) -> int:
@@ -87,18 +100,30 @@ def save_key(provider: str, key: str):
 _ENV = dict(os.environ, PATH=str(config.ROOT / ".venv" / "bin") + ":/opt/homebrew/bin:/usr/local/bin:" + os.environ.get("PATH", "/usr/bin:/bin:/usr/sbin:/sbin"))
 
 
-def run_command(command: str) -> str:
+def run_command(command: str, cwd: str = "") -> str:
     """Run a shell command on the user's Mac (zsh) and return its output. Use for opening apps
-    (open -a "App"), files, AppleScript (osascript), system info, anything a terminal can do."""
+    (open -a "App"), files, AppleScript (osascript), system info, builds and tests (cwd = the project folder).
+    Anything long-running (a server, a watcher) belongs in terminal_start instead."""
     try:
+        where = os.path.expanduser(cwd) if cwd and os.path.isdir(os.path.expanduser(cwd)) else str(config.HOME)
+        env = _ENV
+        if where != str(config.HOME):
+            # A project runs with its own Python, not Mike's (whose packages are Mike's, not the project's).
+            mine = str(config.ROOT / ".venv" / "bin")
+            theirs = os.path.join(where, ".venv", "bin")
+            inside_mike = os.path.realpath(where).startswith(str(config.ROOT))
+            parts = [q for q in _ENV["PATH"].split(":") if q != mine]
+            env = dict(_ENV, PATH=":".join(([theirs] if os.path.isdir(theirs) else []) + ([mine] if inside_mike else []) + parts))
         # Not a login shell: profile scripts print their own noise, which models read as "it failed".
-        r = subprocess.run(["/bin/zsh", "-c", command], capture_output=True, text=True, timeout=60,
-                           cwd=str(config.HOME), env=_ENV)
+        r = subprocess.run(["/bin/zsh", "-c", command], capture_output=True, text=True, timeout=120,
+                           cwd=where, env=env)
     except subprocess.TimeoutExpired:
-        return "Timed out after 60 seconds."
+        return "Timed out after 120 seconds. If it is meant to keep running, start it with terminal_start instead."
     out, err = r.stdout.strip(), r.stderr.strip()
     if r.returncode == 0:
-        return (out or "Done (it worked, no output).")[:6000]
+        # Many tools (unittest, git, pip, build tools) print their results to stderr even on success: show them.
+        shown = out + (("\n" if out else "") + err if err else "")
+        return (shown or "Done (it worked, no output).")[:6000]
     return f"Failed (exit code {r.returncode}): {(err or out)[:3000]}"
 
 
@@ -115,24 +140,106 @@ def write_file(path: str, content: str) -> str:
         return f"Couldn't write it: {e}"
 
 
-def read_file(path: str) -> str:
-    """Read a text file from the user's Mac (first 20,000 characters)."""
+def read_file(path: str, start: int = 0, end: int = 0) -> str:
+    """Read a text file (first 20,000 characters). Give start and end line numbers to read just that part, shown
+    with line numbers (the numbers are not part of the file: never copy them into edit_file)."""
     try:
         with open(os.path.expanduser(path), errors="replace") as f:
-            return f.read(20000)
+            text = f.read()
     except Exception as e:
         return f"Couldn't read it: {e}"
+    if start or end:
+        lines = text.splitlines()
+        a, b = max(1, start or 1), min(len(lines), end or len(lines))
+        return f"{path} lines {a}-{b} of {len(lines)}:\n" + "\n".join(f"{i}: {lines[i - 1]}" for i in range(a, b + 1))[:20000]
+    return text[:20000] + (f"\n[cut: the file is {len(text)} characters; use start and end to read the rest]" if len(text) > 20000 else "")
+
+
+def _syntax_problem(path: str) -> str:
+    """After an edit: a syntax error found right away is cheap to fix; found later it is a mystery."""
+    try:
+        if path.endswith(".py"):
+            import py_compile
+            py_compile.compile(path, doraise=True)
+        elif path.endswith(".json"):
+            json.load(open(path))
+        elif path.endswith((".js", ".mjs")) and shutil.which("node"):
+            r = subprocess.run(["node", "--check", path], capture_output=True, text=True, timeout=20)
+            if r.returncode:
+                return r.stderr.strip()[:400]
+    except Exception as e:
+        return str(e)[:400]
+    return ""
+
+
+def edit_file(path: str, old: str, new: str, replace_all: bool = False) -> str:
+    """Change part of an existing file: replace the exact text old with new. First read_file it and copy old exactly
+    (same indentation, no line numbers), enough lines to be unique. Prefer this to rewriting a whole file."""
+    p = os.path.expanduser(path)
+    try:
+        text = open(p, errors="replace").read()
+    except Exception as e:
+        return f"Couldn't read {path}: {e}"
+    if not old:
+        return "old is empty. Give the exact existing text to replace."
+    n = text.count(old)
+    if n == 0 and old.strip("\n") != old:
+        old, new = old.strip("\n"), new.strip("\n")
+        n = text.count(old)
+    if n == 0:
+        # Show the closest existing lines so the next try can copy them exactly.
+        first = old.strip().splitlines()[0].strip() if old.strip() else ""
+        lines = text.splitlines()
+        near = sorted(range(len(lines)), key=lambda i: -difflib.SequenceMatcher(None, first, lines[i].strip()).ratio())[:1]
+        hint = ""
+        if near:
+            i = near[0]
+            hint = " Closest existing text:\n" + "\n".join(f"{j + 1}: {lines[j]}" for j in range(max(0, i - 1), min(len(lines), i + 4)))
+        return f"Not changed: that text isn't in {path} exactly (check indentation and spelling).{hint}"
+    if n > 1 and not replace_all:
+        return f"Not changed: that text appears {n} times in {path}. Include more surrounding lines to make it unique, or set replace_all."
+    out = text.replace(old, new) if replace_all else text.replace(old, new, 1)
+    with open(p, "w") as fh:
+        fh.write(out)
+    problem = _syntax_problem(p)
+    at = text.find(old)
+    line = text[:at].count("\n") + 1
+    msg = f"Edited {path} near line {line} ({n if replace_all else 1} change)."
+    if problem:
+        msg += f" WARNING: the file now has a syntax error, fix it before anything else: {problem}"
+    return msg
+
+
+def search_code(pattern: str, path: str = "") -> str:
+    """Search a project's files for text (grep -rn), skipping dependencies. path defaults to the active project."""
+    root = os.path.expanduser(path) if path else (str(projects.current() or config.HOME))
+    try:
+        r = subprocess.run(["grep", "-rnIE", "--exclude-dir=.git", "--exclude-dir=node_modules", "--exclude-dir=.venv",
+                            "--exclude-dir=__pycache__", "--exclude-dir=dist", "--exclude-dir=build", "-m", "5", pattern, root],
+                           capture_output=True, text=True, timeout=20)
+    except Exception as e:
+        return f"Search failed: {e}"
+    lines = [l.replace(root + "/", "") for l in r.stdout.splitlines()][:40]
+    return "\n".join(lines)[:5000] or "No matches."
 
 
 # Mike's own tools, minus the image ones (most free models are text-only: read apps with `ui`).
 # (The everyday set only: every tool description costs tokens against the free per-minute limits.)
+# Always on: starting, watching and stopping a long-running process is needed from the very first step of a coding request,
+# before the router has had time to switch coding mode on (without them the model opened Terminal.app with AppleScript).
+BASE_TERMINAL = [mike_tools.terminal_start, mike_tools.terminal_read, mike_tools.terminal_stop]
 TOOL_FUNCS = {f.__name__: f for f in [
     run_command, read_file, write_file, mike_tools.find_skill, mike_tools.use_skill,
     mike_tools.ui, mike_tools.press, mike_tools.set_text, mike_tools.menu, mike_tools.type_text,
     mike_tools.press_key, mike_tools.media,
     mike_tools.set_reminder, mike_tools.list_reminders, mike_tools.cancel_reminder,
-    mike_tools.remember, mike_tools.recall,
+    mike_tools.remember, mike_tools.recall, edit_file, *BASE_TERMINAL,
 ]}
+# Software-building tools: offered only on programming requests (every tool description costs free-tier tokens).
+DEV_FUNCS = [search_code, mike_tools.project_find, mike_tools.project_use, mike_tools.project_info,
+             mike_tools.terminal_send, mike_tools.terminal_interrupt, mike_tools.self_check, mike_tools.mike_restart]
+
+TOOL_FUNCS.update({f.__name__: f for f in DEV_FUNCS})
 
 
 def _schema(fn) -> dict:
@@ -156,7 +263,9 @@ def _schema(fn) -> dict:
                                              "parameters": {"type": "object", "properties": props, "required": required}}}
 
 
-TOOLS = [_schema(f) for f in TOOL_FUNCS.values()]
+DEV_NAMES = {f.__name__ for f in DEV_FUNCS}
+TOOLS = [_schema(f) for f in TOOL_FUNCS.values() if f.__name__ not in DEV_NAMES]
+DEV_TOOLS = [_schema(f) for f in DEV_FUNCS]
 
 BACKUP_PERSONA = f"""You are {config.NAME}, the user's AI companion on their Mac, like FRIDAY for Iron Man. Your words
 are spoken aloud. Talk like a sharp, warm friend their age: short (one or two sentences), casual, real
@@ -188,6 +297,7 @@ Recipes:
   for this request ("A skill applies" below), follow it; otherwise call find_skill first, then use_skill with the best
   match and follow it. Skills make the result far better. Write files with write_file (not shell heredocs), run scripts with run_command
   (python3), check the file exists, then open it. Save in ~/Documents/Mike unless told otherwise.
+- Servers, watchers and anything that keeps running: terminal_start, then terminal_read (wait 3 to 5), then terminal_stop. Never use Terminal.app, `open -a Terminal` or AppleScript for that.
 - Volume: run_command osascript -e "set volume output volume 40".
 - Weather: run_command curl -s "wttr.in/?format=%l:+%C+%t". Battery: pmset -g batt.
 - Files: mdfind -name "..." or mdfind "kind:pdf topic"; read PDFs with pdftotext FILE - | head -200.
@@ -225,7 +335,20 @@ NUDGE_FILE = ("(Check: {name} doesn't exist yet, so the task isn't done and you 
 ROUTER_SYSTEM = (
     "You route a voice assistant's requests. You get the user's request and a list of skills (ready-made know-how for "
     "making things). Reply with the single skill name that would clearly make the result better, or NONE if no skill is "
-    "needed (chat, questions, simple commands, opening apps, music, reminders, settings). Reply with only the name or NONE.")
+    "needed (chat, questions, simple commands, opening apps, music, reminders, settings). Reply CODE when the user wants "
+    "software programmed, changed, fixed, run, tested or committed (code, bugs, tests, scripts, apps, repositories, a "
+    "project's files); a one-off document, image or small page is a skill, not CODE. Planning, brainstorming, explaining or just discussing an idea (even a software or hardware one) is NONE: CODE means actually doing the work on files now. Reply with only the name, CODE or NONE.")
+DEV_PROMPT = """You are now building software for the user, step by step, like a careful engineer.
+- Only create or change files when they have asked for the work to be done. If they want to plan, discuss, explain or brainstorm, touch nothing: answer in two or three spoken sentences and ask one question. If it is unclear what to build or where, ask one short question first.
+- Orient first: project_find / project_use if a project is named (project_info shows its commands), otherwise work where they said.
+- Never guess what a file contains: read_file it (or search_code) before changing it.
+- Change existing files with edit_file (old = exact text copied from read_file; a few lines so it is unique). Use write_file only for new files.
+  Run commands in the project with run_command(cwd=the project folder). Servers and watchers go in terminal_start; look at them with terminal_read(wait=5).
+- Tests must never touch real data files: have them use a temporary file or folder.
+- After every change, run it or its tests and read the real output. If it fails, read the error, fix the cause, run again. Do not stop at the first failure and do not say it works until you have seen it pass.
+- Keep going until the job is truly done. Small steps. Never print or read code aloud, and no bullet lists, headings or code blocks in your reply: while you work say nothing, at the end say at most two plain spoken sentences about what you changed and what you saw.
+- Don't touch files that the job doesn't need. To change Mike himself: edit the mike folder, self_check, tell the user, only then mike_restart."""
+
 NUDGE_SAY = "(Now reply to the user in one short spoken sentence: what happened?)"
 
 
@@ -265,6 +388,8 @@ class FallbackBrain:
         self.models: dict[str, list[str]] = {}  # provider -> usable model ids, best first
         self.failed_until: dict[str, float] = {}   # "provider" or "provider/model" -> benched until
         self.last_used = ""                    # "Groq · openai/gpt-oss-120b"
+        self._lat: dict[str, float] = {}      # how long each model took to answer its check (seconds)
+        self.dev_until = 0.0                   # programming mode (dev tools + rules) stays on this long after a coding request
 
     # ---- providers --------------------------------------------------------
     def available(self) -> list[dict]:
@@ -295,8 +420,18 @@ class FallbackBrain:
                     i = i.split("/", 1)[1] if i.startswith("models/") else i
                     if i not in picks:
                         picks.append(i)
+            if p.get("pattern"):
+                rx, found = re.compile(p["pattern"]), []
+                for i in ids:
+                    j = i.split("/", 1)[1] if i.startswith("models/") else i
+                    mt = rx.match(j)
+                    if mt:
+                        found.append((-float(mt.group(1)), 1 if mt.group(2) else 0, j))     # newest first, full before lite
+                picks = [j for _, _, j in sorted(found)] + [x for x in picks if x not in {j for _, _, j in found}]
             if not p.get("local"):
                 picks = await self._verify(client, p, key, picks[:6])
+                if p.get("pattern"):
+                    picks.sort(key=lambda m: self._lat.get(m, 99))      # a voice assistant wants the quickest of the current models
             if not picks:
                 return None
             self.models[p["id"]] = picks[:4]
@@ -307,11 +442,14 @@ class FallbackBrain:
         tool = {"type": "function", "function": {"name": "noop", "description": "unused",
                                                  "parameters": {"type": "object", "properties": {}}}}
         async def ok(m):
+            t0 = time.time()
             try:
                 r = await client.post(f"{p['base']}/chat/completions", headers={"Authorization": f"Bearer {key}"}, timeout=12,
                                       json={"model": m, "max_tokens": 4, "tools": [tool],
                                             "messages": [{"role": "user", "content": "Reply OK"}]})
-                return r.status_code == 200 or r.status_code == 429   # 429 = real model, just busy right now
+                # 429 = a real model that is just busy right now; but "limit: 0" means this key has no access to it at all.
+                self._lat[m] = time.time() - t0
+                return r.status_code == 200 or (r.status_code == 429 and "limit: 0" not in r.text)
             except Exception:
                 return False
         results = await asyncio.gather(*(ok(m) for m in ids))
@@ -376,6 +514,8 @@ class FallbackBrain:
         if not providers:
             raise RuntimeError("No backup model is set up. Add a free key in Settings > Model.")
         system = backup_system_prompt()
+        if time.time() < self.dev_until:               # still in a coding conversation: "fix it", "run it again"
+            system += "\n\n" + DEV_PROMPT
         # The skill router runs alongside the answer, not before it: most requests need no skill, and
         # those shouldn't wait for it. If it picks one before anything was said or done, restart with it.
         self._acted = False
@@ -405,6 +545,8 @@ class FallbackBrain:
                 if await self.resolve_model(client, p):
                     lanes += [(p, m) for m in self.lanes(p)]
             lanes.sort(key=lambda pm: _rank(pm[0]["id"], pm[1], len(lanes)))   # stable: provider order breaks ties
+            if time.time() < self.dev_until:                  # programming wants the strongest models, not the fastest small ones
+                lanes = [l for l in lanes if _strong(l[1])] or lanes
             for p, model in lanes:
                 if self.failed_until.get(p["id"], 0) > time.time():
                     continue
@@ -469,6 +611,10 @@ class FallbackBrain:
         except Exception:
             return ""
         name = (out or "").strip().splitlines()[0].strip(" .`'\"*").lower() if (out or "").strip() else ""
+        if name == "code":
+            self.dev_until = time.time() + 20 * 60
+            log.info("coding request: dev tools on")
+            return DEV_PROMPT
         if name not in idx:
             return ""
         log.info("skill picked for this request: %s", name)
@@ -487,14 +633,17 @@ class FallbackBrain:
     async def _rounds(self, client, p, model, system, headers, request, seen, per_tool, nudged) -> str:
         said, used_tool = "", False
         targets = _targets(request)
-        for _ in range(16):
+        for rnd in range(36):
+            dev = time.time() < self.dev_until          # the router may switch coding mode on while we're already working
+            if rnd >= (36 if dev else 16):
+                break
             # An action request with no tool used yet: hold the words back until we know they're true.
             hold = (not used_tool and bool(ACTION_RE.search(request)) and "act" not in nudged) or bool(_missing(targets))
-            body = {"model": model, "stream": True, "tools": TOOLS, "temperature": 0.4, "max_tokens": 1200 if p["id"] == "groq" else 4000,   # reasoning models spend part of it thinking
+            body = {"model": model, "stream": True, "tools": TOOLS + (DEV_TOOLS if dev else []), "temperature": 0.2 if dev else 0.4, "max_tokens": 1200 if p["id"] == "groq" else 4000,   # reasoning models spend part of it thinking
                     
-                    "messages": [{"role": "system", "content": system + self._now_note()}] + self._payload_history()}
+                    "messages": [{"role": "system", "content": system + ("\n\n" + DEV_PROMPT if dev and DEV_PROMPT not in system else "") + self._now_note()}] + self._payload_history()}
             if p["id"] == "groq" and "gpt-oss" in model:
-                body["reasoning_effort"] = "medium"     # think a little before acting: far fewer silly moves
+                body["reasoning_effort"] = "high" if dev else "medium"     # think before acting: far fewer silly moves (more for code)
             text, calls = "", {}
             head = {"buf": "", "done": False}
 
@@ -603,11 +752,13 @@ class FallbackBrain:
                 if sig in seen:
                     result = (f"You already ran exactly this a moment ago; it returned: {seen[sig][:300]}. "
                               "Don't repeat it. Take a different next step, or tell the user what happened.")
-                elif per_tool[c["name"]] > 8:
+                elif per_tool[c["name"]] > (30 if dev else 8):
                     result = "That's too many tries with this tool. Stop and tell the user honestly where things stand."
                 else:
                     result = await self._call(c["name"], c["args"])
                     seen[sig] = result
+                    if c["name"] in ("edit_file", "write_file", "terminal_send", "terminal_start", "terminal_interrupt", "terminal_stop"):
+                        seen.clear()           # the files or terminals changed: re-running a test or command is now a fresh question
                 self.history.append({"role": "tool", "tool_call_id": c["id"] or f"call_{i}", "content": result[:3000]})
         return said
 
@@ -649,8 +800,12 @@ class FallbackBrain:
         except json.JSONDecodeError:
             return "Arguments weren't valid JSON; try again."
         self._acted = True
-        tool_name = {"run_command": "Bash", "write_file": "Write"}.get(name, name)
-        perm_args = {"file_path": args.get("path", "")} if name == "write_file" else args
+        if name in ("edit_file", "search_code") or (name == "write_file" and str(args.get("path", "")).lower().endswith(CODE_EXT)):
+            self.dev_until = time.time() + 20 * 60      # he is working on code: coding mode on, whatever the router said
+        if name == "run_command" and not args.get("cwd") and time.time() < self.dev_until and projects.current():
+            args["cwd"] = str(projects.current())      # coding: commands run in the project unless told otherwise
+        tool_name = {"run_command": "Bash", "write_file": "Write", "edit_file": "Edit"}.get(name, name)
+        perm_args = {"file_path": args.get("path", "")} if name in ("write_file", "edit_file") else args
         await self.on_tool(tool_name, args)
         allowed = await self.on_permission(tool_name, perm_args)   # sensitive shell commands still ask you
         if allowed is not True:

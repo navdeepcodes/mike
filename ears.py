@@ -28,21 +28,12 @@ MAX_SECONDS = 30
 # Tells Whisper the name exists without making it think the name was already said
 # (a prompt like "Hey Mike." makes it skip the name in "Hey Mike, open...").
 WAKE_HINT = f"Glossary: {config.NAME} (the assistant's name)."
-# For the accurate model: a few short requests that start with the name, so it spells "Mike," as a
-# name and not "My," / "Mic," / "Might" (measured: word errors on clean speech 10% -> 3%, with
-# room chatter behind 29% -> 5%). Filtered below like any other segment, so noise can't pass as speech.
-# Varied everyday requests (maths, weather, alarms, general questions) so "plus" isn't heard as "bless" and
-# numbers and questions come out the way they're said. Measured on accented test voices: 13% -> 3% word errors.
-HINT_SENTENCES = [f"{config.NAME}, what's seventeen plus twenty six?", f"Hey {config.NAME}, set an alarm for six forty five.",
-                 f"{config.NAME}, what's the capital of Peru?", f"{config.NAME}, read me the next chapter."]
+# For the accurate model: only the name, in the way it's called ("Hey Mike. Okay Mike."). It spells "Mike" instead of
+# "My" / "Mic" and keeps a short call recognisable through room noise (5 of 6 calls kept at 0 dB, against 0 of 6 with no hint).
+# A longer hint made noise come out as whole fake requests ("Mike, what's the capital of Peru?"), so it stays this plain.
+HINT_SENTENCES = [f"Hey {config.NAME}.", f"Okay {config.NAME}."]
 ADDRESS_HINT = " ".join(HINT_SENTENCES)
 
-
-def _is_hint_echo(text: str) -> bool:
-    """Steady noise can make Whisper recite the hint; unusual sentences, so a real request never matches."""
-    norm = lambda t: re.sub(r"[^a-z0-9 ]", "", re.sub(rf"^\W*(hey\W+)?{config.NAME}\W+", "", t.lower().strip(), flags=re.I)).strip()
-    t = norm(text)
-    return bool(t) and any(difflib.SequenceMatcher(None, t, norm(h)).ratio() >= 0.9 for h in HINT_SENTENCES)
 
 
 # Whisper invents these from noise; ignore them when they are the whole utterance.
@@ -61,6 +52,17 @@ def _dedupe(text: str) -> str:
     if len(kept) != len(parts):
         log.info("dropped repeated speech from: %r", text[:120])
     return " ".join(kept)
+
+
+def rhythm_db(pcm: bytes) -> float:
+    """How much the loudness rises and falls (the beat of syllables), 10th to 90th percentile in dB.
+    Speech, even in a noisy room, is 7 dB or more; steady noise (hum, fan, hiss) is 5 dB or less."""
+    a = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
+    n = len(a) // 320
+    if n < 10:
+        return 99.0                      # too short to judge
+    db = 20 * np.log10(np.sqrt(np.mean(a[: n * 320].reshape(n, 320) ** 2, axis=1)) + 1e-9)
+    return float(np.percentile(db, 90) - np.percentile(db, 10))
 
 
 def loudness_db(pcm: bytes) -> float:
@@ -100,6 +102,7 @@ class Ears:
         self.wake_level: float | None = None
         self.last_db = -90.0
         self.last_pcm = b""       # the clip behind the latest utterance (for the voice check)
+        self.clip_is_you = False  # set by the voice prefilter: this clip clearly sounds like you
         # The quick screening model mishears the name in a few typical ways. A false hit only
         # costs one pass of the accurate model, which then decides for real.
         names = {w.split()[-1] for w in config.WAKE_WORDS} | {config.NAME.lower(), "michael", "mikes", "mics",
@@ -170,9 +173,6 @@ class Ears:
                 log.exception("transcription failed")
                 continue
             log.info("timing: transcribed %.1fs of speech in %.2fs", len(pcm) / (RATE * 2), time.time() - t0)
-            if text and _is_hint_echo(text):
-                log.info("dropped: that is the hint being recited, not speech: %r", text[:80])
-                text = ""
             if text and text.lower().strip(" .,!?") not in HALLUCINATIONS:
                 if self.wake_re.search(text):
                     self.wake_level = self.last_db if self.wake_level is None else 0.7 * self.wake_level + 0.3 * self.last_db
@@ -198,6 +198,9 @@ class Ears:
         peak = float(np.max(np.abs(audio))) if len(audio) else 0.0
         if peak < 0.002:      # no signal at all: with a name-prompt Whisper would invent one from nothing
             return ""
+        if rhythm_db(pcm) < 6.0:   # steady noise: the name-prompt can turn that into a phantom "Hey Mike"
+            log.info("skipped steady noise (no speech rhythm)")
+            return ""
         if 0.0005 < peak < 0.5:
             audio = audio * (0.5 / peak)
         if self.mlx and not attentive and getattr(self, "screen_model", None):
@@ -205,7 +208,7 @@ class Ears:
             t = time.time()
             quick = self.mlx.transcribe(audio, path_or_hf_repo=self.screen_model, language="en",
                                         temperature=0.0, condition_on_previous_text=False,
-                                        initial_prompt=WAKE_HINT)
+                                        initial_prompt=ADDRESS_HINT)      # same plain call as the accurate model: much better in a noisy room
             qtext = quick.get("text", "").strip()
             # Nothing understood in a short clip: could be a mumbled "Mike", let the accurate model judge.
             # Only a short clip loud enough to be you near the Mac is worth a second look.
@@ -237,8 +240,15 @@ class Ears:
                     condition_on_previous_text=False, no_speech_threshold=0.5, initial_prompt=ADDRESS_HINT)
             kept, dropped = [], []
             for s in res.get("segments", []):
-                if s.get("no_speech_prob", 0) > 0.55 or s.get("avg_logprob", 0) < -0.9 or s.get("compression_ratio", 1) > 2.2:
+                words = re.findall(r"[a-z']+", s.get("text", "").lower())
+                trusted = getattr(self, "clip_is_you", False)       # the voice check says it's you: ASR doubt counts for less
+                # A short call of the name in a noisy room scores badly even when it's right; give it more room.
+                call = 0 < len(words) <= 3 and bool(self.wake_re.search(s.get("text", "")))
+                if (s.get("no_speech_prob", 0) > (0.65 if (call or trusted) else 0.55)
+                        or s.get("avg_logprob", 0) < (-1.4 if trusted else -1.3 if call else -0.9)
+                        or s.get("compression_ratio", 1) > 2.2):
                     dropped.append(s.get("text", "").strip())
+                    log.info("low-confidence segment (logprob %.2f, no-speech %.2f, your voice: %s): %r", s.get("avg_logprob", 0), s.get("no_speech_prob", 0), trusted, s.get("text", "").strip()[:60])
                     continue
                 kept.append(s.get("text", "").strip())
             if dropped:

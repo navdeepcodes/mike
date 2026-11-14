@@ -1,5 +1,6 @@
 // Mike — interface logic. Talks to server.py over /ws; to Mike.app through window.webkit.
 import { PETS, PET_ORDER, NONE, preview } from "/static/pets.js";
+import { Code } from "/static/code.js";
 
 // Element lookup by id, re-resolved if a node was replaced (e.g. the greeting after "New conversation").
 const el = new Proxy({}, {
@@ -67,6 +68,7 @@ function renderStatus() {
 }
 function setState(s) {
   S.state = s;
+  Code.busy(s === "thinking" || s === "speaking");
   if (s !== "thinking") S.lastTool = "";
   document.body.dataset.state = s;
   renderStatus();
@@ -74,12 +76,13 @@ function setState(s) {
 }
 
 // ------------------------------------------------------------------ views & sidebar
-const TITLES = { chat: "Mike", history: "History", memory: "Memory", reminders: "Reminders" };
+const TITLES = { chat: "Mike", code: "Code", history: "History", memory: "Memory", reminders: "Reminders" };
 function showView(v) {
   S.view = v;
   document.querySelectorAll(".view").forEach((s) => s.classList.toggle("hidden", s.dataset.view !== v));
   document.querySelectorAll("#nav button").forEach((b) => b.classList.toggle("on", b.dataset.view === v));
   el.topTitle.textContent = TITLES[v];
+  if (v === "code") Code.opened();
   if (v === "history") send({ type: "history_get", day: S.historyDay, q: el.historySearch.value.trim() });
   if (v === "memory") send({ type: "memory_get" });
   if (v === "reminders") send({ type: "reminders_get" });
@@ -231,6 +234,15 @@ function stopAudio(gen) {
 
 // ------------------------------------------------------------------ socket
 function send(obj) { if (S.ws?.readyState === 1) S.ws.send(JSON.stringify(obj)); }
+// Tell the server when this window is in front and focused, so the desktop pet can keep quiet meanwhile.
+let lastActive = null;
+function reportActive(force) {
+  const active = document.visibilityState === "visible" && document.hasFocus();
+  if (!force && active === lastActive) return;
+  lastActive = active; send({ type: "window", active });
+}
+window.addEventListener("focus", () => reportActive()); window.addEventListener("blur", () => reportActive());
+document.addEventListener("visibilitychange", () => reportActive());
 function connect() {
   const ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`);
   ws.binaryType = "arraybuffer";
@@ -238,6 +250,7 @@ function connect() {
   ws.onopen = () => {
     S.connected = true;
     send({ type: "settings_get" }); send({ type: "history_get" }); send({ type: "reminders_get" });
+    reportActive(true);
     if (presence.present !== null) send({ type: "presence", present: presence.present });
   };
   ws.onclose = (ev) => {
@@ -257,6 +270,8 @@ function refreshSoon() {
 }
 
 function handle(m) {
+  if (m.type === "user" || m.type === "assistant_delta" || m.type === "assistant_done" || m.type === "tool") Code.event(m);
+  if (["code_state", "term", "files", "diff", "file", "code_toast"].includes(m.type)) { Code.handle(m); return; }
   switch (m.type) {
     case "hello":
       setState(m.state || "idle");
@@ -662,13 +677,36 @@ async function startMic(deviceId = pref.get("micId", "")) {
   if (!S.workletLoaded) { await ctx.audioWorklet.addModule("/static/mic-worklet.js"); S.workletLoaded = true; }
   const src = ctx.createMediaStreamSource(stream);
   const node = new AudioWorkletNode(ctx, "mic-worklet");
-  node.port.onmessage = (e) => { if (S.micOn && S.ws?.readyState === 1) S.ws.send(e.data); };
+  node.port.onmessage = (e) => { S.audioAt = Date.now(); if (S.micOn && S.ws?.readyState === 1) S.ws.send(e.data); };
+  S.audioAt = Date.now();
+  stream.getAudioTracks().forEach((t) => { t.onended = () => { console.warn("[mic] track ended; reopening"); if (S.micOn) retryMic(); }; });
   S.analyser = ctx.createAnalyser(); S.analyser.fftSize = 512;
   src.connect(S.analyser); src.connect(node);
   const mute = ctx.createGain(); mute.gain.value = 0;
   node.connect(mute).connect(ctx.destination);
   S.micStream = stream; S.micNode = node; S.micOk = true;
 }
+// After the Mac sleeps (or the mic device changes) macOS ends the stream and the page keeps looking connected, but no
+// audio arrives: he is deaf until restarted. Notice that and reopen the mic by himself.
+S.micFails = 0;
+function micCheck() {
+  if (!S.micOn || !S.micOk || S.micPending || !S.micStream) return;          // muted on purpose, or already being reopened
+  const ctx = S.audioCtx, tr = S.micStream.getAudioTracks()[0];
+  if (ctx && ctx.state !== "running") ctx.resume().catch(() => {});
+  const stale = Date.now() - (S.audioAt || 0) > 5000;
+  if (tr && tr.readyState === "live" && !stale) { S.micFails = 0; return; }
+  S.micFails += 1;
+  console.warn(`[mic] no audio (${tr ? tr.readyState : "no track"}, stale ${stale}); reopening, try ${S.micFails}`);
+  if (S.micFails >= 2 && ctx) {                                               // the audio engine itself is stuck: build a new one
+    try { ctx.close(); } catch {}
+    S.audioCtx = null; S.workletLoaded = false;
+  }
+  retryMic();
+}
+setInterval(micCheck, 4000);
+["focus", "pageshow", "online"].forEach((ev) => window.addEventListener(ev, () => setTimeout(micCheck, 600)));
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") setTimeout(micCheck, 600); });
+navigator.mediaDevices?.addEventListener?.("devicechange", () => setTimeout(micCheck, 600));
 function stopMicStream() {
   // Release the mic completely, so macOS turns its mic light off.
   S.micStream?.getTracks().forEach((t) => t.stop());
@@ -852,6 +890,7 @@ function autosize() {
   el.input.style.height = `${Math.min(180, h)}px`;
   el.input.classList.toggle("scroll", h > 180);
 }
+Code.init({ send, ask: (text) => { ensureAudio().resume?.(); send({ type: "text", text, source: "code" }); }, stop: () => interrupt() });
 function sendText(text) { text = text.trim(); if (!text) return; ensureAudio().resume?.(); send({ type: "text", text }); if (S.view !== "chat") showView("chat"); }
 const syncSend = () => { el.sendBtn.disabled = !el.input.value.trim(); autosize(); };
 el.input.addEventListener("input", syncSend); syncSend();

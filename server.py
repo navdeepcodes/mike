@@ -24,10 +24,13 @@ import memory
 import random
 import reminders
 from fallback import FallbackBrain, PROVIDERS, save_key
+import shutil
 import subprocess
 from brain import Brain
 from ears import Ears
 import voice
+import projects
+import terminals
 import voiceprint
 from voice import SentenceSplitter, synth
 
@@ -162,6 +165,7 @@ class Mike:
         self.ws: WebSocket | None = None      # the main window: owns mic, camera and speaker
         self.ws_lock = asyncio.Lock()
         self.pets: set[WebSocket] = set()     # desktop pets: follow along, can wake/stop/answer
+        self.term_dirty: set[str] = set()     # terminals with new output to show in the Code view
         self.state = "booting"
         self.gen = 0                      # bumps on every interrupt; stale audio is dropped
         self.speech_q: asyncio.Queue = asyncio.Queue()
@@ -353,7 +357,7 @@ class Mike:
             self.held.append(text)          # working on his own: don't narrate every step aloud
             return
         for sentence in self.splitter.push(text):
-            self.say(sentence)
+            self.say_capped(sentence)
         # The last sentence has no text after it, so don't wait for the whole turn to end:
         # if nothing more arrives for a moment, speak it.
         if self.splitter.ends_cleanly():
@@ -363,11 +367,23 @@ class Mike:
                 await asyncio.sleep(0.18)
                 if self.splitter is sp and gen == self.gen and sp.buf == buf:
                     for sentence in sp.flush():
-                        self.say(sentence)
+                        self.say_capped(sentence)
             asyncio.create_task(flush_soon())
 
+    def say_capped(self, sentence: str):
+        """While coding, speak only the first few sentences of each stretch of talk; the rest is on screen. (A voice reading out
+        a build log or a design essay is the opposite of help.)"""
+        coding = getattr(self, "coding_turn", False) or time.time() < self.backup.dev_until
+        if coding:
+            self.spoken_n = getattr(self, "spoken_n", 0) + 1
+            if self.spoken_n > 2:
+                return
+        self.say(sentence)
+
     ACKS = ["On it.", "Sure, one sec.", "Yep, give me a sec.", "Okay, on it.", "Got it, hang on.", "One sec."]
-    QUIET_TOOLS = {"remember", "update_memory", "forget", "keep_going", "task_complete", "dismiss_pet"}
+    QUIET_TOOLS = {"remember", "update_memory", "forget", "keep_going", "task_complete", "dismiss_pet",
+                   "terminal_start", "terminal_read", "terminal_send", "terminal_interrupt", "terminal_stop", "terminal_list",
+                   "terminal_show", "project_find", "project_use", "project_info", "self_check"}
 
     async def _ack_later(self, turn: int):
         """If a task runs a while with nothing said yet, say a quick 'on it' like a person would."""
@@ -378,6 +394,7 @@ class Mike:
 
     async def on_tool(self, name: str, inp: dict):
         self.round_tools += 1
+        self.spoken_n = 0                     # a new stretch of talk after each tool step
         # Text before a tool and text after it arrive glued together ("...at the top.Spotify's on").
         # Close off what was said so far as its own sentence.
         if self.turn_reply and not "".join(self.turn_reply).endswith((" ", "\n")):
@@ -390,7 +407,14 @@ class Mike:
         detail = (inp.get("description") or inp.get("command") or inp.get("file_path")
                   or inp.get("query") or inp.get("url") or inp.get("pattern") or "")
         pretty = name.replace("mcp__mike__", "").replace("mcp__", "")
-        await self.send({"type": "tool", "name": pretty, "detail": str(detail)[:200]})
+        cut = lambda v, n: str(v)[:n] if v else ""
+        args = {"command": cut(inp.get("command"), 600), "file": cut(inp.get("file_path") or inp.get("path"), 300),
+                "old": cut(inp.get("old_string") or inp.get("old"), 700), "new": cut(inp.get("new_string") or inp.get("new"), 700),
+                "content": cut(inp.get("content"), 900), "pattern": cut(inp.get("pattern"), 200)}
+        if isinstance(inp.get("todos"), list):
+            args["todos"] = [{"text": str(t.get("content") or t.get("text") or "")[:120], "status": t.get("status", "pending")}
+                             for t in inp["todos"][:20] if isinstance(t, dict)]
+        await self.send({"type": "tool", "name": pretty, "detail": str(detail)[:200], "args": {k: v for k, v in args.items() if v}})
         log.info("tool %s: %s", pretty, str(detail)[:160])
         if pretty == "look":
             await self.send({"type": "flash", "what": "camera"})
@@ -596,7 +620,16 @@ class Mike:
                     asyncio.create_task(self._expire_followup(self.followup_until))
 
     def voice_prefilter(self, pcm: bytes) -> bool:
-        return (not config.VOICE_MATCH) or self.voice_id.maybe_user(pcm)
+        """Could this clip be you? Also notes whether it clearly is, so the speech filter can trust such clips more."""
+        self.ears.clip_is_you = False
+        if not config.VOICE_MATCH:
+            return True
+        r = self.voice_id.score(pcm)
+        if r is None:
+            return True
+        score, thr = r
+        self.ears.clip_is_you = score >= thr
+        return score >= thr - 0.10
 
     async def _duck_if_you(self, gen: int):
         """Lower Mike's volume only once the first moments of speech sound like you."""
@@ -625,6 +658,7 @@ class Mike:
 
     async def on_utterance(self, text: str, mic: bool = False):
         log.info("heard: %s", text)
+        self.coding_turn = False
         self.t_heard = time.time()      # for the "heard → first sound" timing in speech_worker
         self.heard_alt = (text, getattr(self.ears, "alt", "") if mic else "")
         self.voice_score = None
@@ -742,6 +776,48 @@ class Mike:
         self.offer_followup = True
         self.say(reply)
         return True
+
+    # ---- Code view: projects + terminals -------------------------------------
+    async def code_state(self) -> dict:
+        loop = asyncio.get_running_loop()
+        cur = await loop.run_in_executor(None, projects.info)
+        found = await loop.run_in_executor(None, projects.scan)
+        changes = await loop.run_in_executor(None, projects.changes) if cur else []
+        brain = "Free model" if self.use_backup() else (config.MODEL or "claude-haiku-5-5").replace("claude-", "").replace("-", " ").title()
+        return {"type": "code_state", "project": cur, "projects": [{"name": p.name, "path": str(p)} for p in found[:40]],
+                "terminals": terminals.snapshot(), "changes": changes, "brain": brain}
+
+    async def send_code_state(self):
+        await self.send(await self.code_state())
+
+    async def term_stream_loop(self):
+        """Pushes terminal output to the Code view a few times a second (not on every byte)."""
+        while True:
+            await asyncio.sleep(0.25)
+            if not self.term_dirty:
+                continue
+            dirty, self.term_dirty = self.term_dirty, set()
+            snap = {t["name"]: t for t in terminals.snapshot()}
+            for name in dirty:
+                if name in snap:
+                    await self.send({"type": "term", **snap[name]})
+
+    def check_code(self) -> str:
+        """Compiles Mike's own Python and JavaScript. 'OK' or what's broken, so a bad edit never gets restarted into."""
+        import py_compile
+        problems = []
+        for f in sorted(config.ROOT.glob("*.py")):
+            try:
+                py_compile.compile(str(f), doraise=True)
+            except py_compile.PyCompileError as e:
+                problems.append(str(e)[:300])
+        node = shutil.which("node")
+        if node:
+            for f in sorted((config.ROOT / "static").glob("*.js")):
+                r = subprocess.run([node, "--check", str(f)], capture_output=True, text=True, timeout=20)
+                if r.returncode:
+                    problems.append(f"{f.name}: {r.stderr.strip()[:300]}")
+        return "OK: everything compiles." if not problems else "Broken:\n" + "\n".join(problems)
 
     INTENT_SYSTEM = (
         "You listen for short spoken commands to a desktop assistant called Mike and decide whether the person is talking about "
@@ -942,7 +1018,7 @@ class Mike:
                 self.backup.reset()
                 await self.brain.start()
             if (not config.MEMORY_AUTO or self.state != "idle" or self.brain.busy
-                    or quiet_for < config.MEMORY_AFTER_QUIET_MIN * 60):
+                    or quiet_for < config.MEMORY_AFTER_QUIET_MIN * 60 or time.time() < getattr(self, "_mem_block", 0)):
                 continue
             try:
                 n = await loop.run_in_executor(None, memory.pending_count)
@@ -950,6 +1026,8 @@ class Mike:
                     continue
                 out = await loop.run_in_executor(None, memory.consolidate)
                 log.info("memory consolidated from %d exchanges: %s", n, out)
+                if isinstance(out, dict) and out.get("error"):
+                    self._mem_block = time.time() + 15 * 60      # Claude can't be reached (e.g. sign-in expired): try again later, not every minute
                 if out.get("add") or out.get("update"):
                     await self.on_log(f"remembered: {'; '.join(out.get('add', []) + out.get('update', []))[:300]}")
             except Exception:
@@ -1112,6 +1190,9 @@ class Mike:
         if ctx.get("window"):
             bits.append(f"window: {ctx['window']}")
         note = "[context: " + " | ".join(bits) + "]"
+        if getattr(self, "code_turn", False) and projects.current():
+            note += f"\n[the user is in the Code tab, working on the project \"{projects.current().name}\" at {projects.current()}; use it unless they name another]"
+            self.code_turn = False
         said, alt = getattr(self, "heard_alt", ("", ""))
         if alt and command.strip() and command.strip() in said:
             note += (f"\n[speech recognition was unsure of this request; a second listen heard: \"{alt}\". "
@@ -1186,7 +1267,8 @@ async def lifespan(app: FastAPI):
     loop = asyncio.get_running_loop()
     await asyncio.gather(loop.run_in_executor(None, mike.ears.load),
                          loop.run_in_executor(None, voice.load))
-    tasks = [asyncio.create_task(mike.ears.run()), asyncio.create_task(mike.speech_worker()),
+    terminals.on_output = lambda n: loop.call_soon_threadsafe(mike.term_dirty.add, n)
+    tasks = [asyncio.create_task(mike.term_stream_loop()), asyncio.create_task(mike.ears.run()), asyncio.create_task(mike.speech_worker()),
              asyncio.create_task(mike.reminder_loop()), asyncio.create_task(mike.activity_loop()),
              asyncio.create_task(mike.memory_loop())]
     if mike.backup.available():
@@ -1275,6 +1357,63 @@ async def api_show():
     return {"ok": True}
 
 
+@app.post("/api/term")
+async def api_term(request: Request):
+    """Terminal control for the model: start, read, send, interrupt, stop, list, show."""
+    b = await request.json()
+    op, name = b.get("op"), str(b.get("name") or "main")
+    loop = asyncio.get_running_loop()
+    if op == "start":
+        out = terminals.start(name, str(b.get("command") or ""), str(b.get("cwd") or (projects.info().get("path") or "")))
+    elif op == "read":
+        out = await loop.run_in_executor(None, terminals.read, name, int(b.get("lines") or 40), float(b.get("wait") or 0))
+    elif op == "send":
+        out = terminals.send(name, str(b.get("text", "")), bool(b.get("enter", True)))
+    elif op == "interrupt":
+        out = terminals.interrupt(name)
+    elif op == "stop":
+        out = terminals.stop(name)
+    elif op == "show":
+        out = terminals.show(name)
+    else:
+        out = terminals.listing()
+    await mike.send_code_state()
+    return {"text": out}
+
+
+@app.post("/api/project")
+async def api_project(request: Request):
+    b = await request.json()
+    op, loop = b.get("op"), asyncio.get_running_loop()
+    if op == "find":
+        found = await loop.run_in_executor(None, projects.find, str(b.get("query", "")))
+        out = "\n".join(f"{p.name}: {p}" for p in found) or "No project matched that."
+    elif op == "use":
+        out = projects.use(str(b.get("path", "")))
+        await mike.send_code_state()
+        out += "\n" + await loop.run_in_executor(None, projects.describe)
+    else:
+        out = await loop.run_in_executor(None, projects.describe)
+    return {"text": out}
+
+
+@app.post("/api/self")
+async def api_self(request: Request):
+    """Mike checking, and (after a clean check) restarting, himself, so he can build himself."""
+    b = await request.json()
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(None, mike.check_code)
+    if b.get("op") != "restart":
+        return {"text": result}
+    if not result.startswith("OK"):
+        return {"text": "Not restarting: " + result}
+    log.info("restarting on request (code check passed)")
+    script = ("sleep 3; /usr/bin/pkill -x Mike; sleep 1; P=$(/usr/sbin/lsof -ti tcp:%d -sTCP:LISTEN); [ -n \"$P\" ] && kill $P; "
+              "sleep 2; /usr/bin/open \"$HOME/Applications/Mike.app\"" % config.PORT)
+    subprocess.Popen(["/bin/sh", "-c", script], start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return {"text": "The code checks out. Mike restarts in about 3 seconds and will be back in under a minute."}
+
+
 @app.post("/api/dismiss")
 async def api_dismiss():
     """The user sent Mike away (close, go away, be quiet): hide the pet until he is called again."""
@@ -1340,6 +1479,7 @@ async def ws_endpoint(ws: WebSocket):
                 text = data.get("text", "").strip()
                 if not text:
                     continue
+                mike.code_turn = mike.coding_turn = data.get("source") == "code"      # typed in the Code tab: he is working on the open project
                 if mike.pending_confirm:
                     await mike.on_utterance(text)
                 else:
@@ -1371,6 +1511,52 @@ async def ws_endpoint(ws: WebSocket):
                 log.info("voice print cleared; relearning from the next wake-ups")
             elif t == "memory_get":
                 await mike.send(mike.memory_payload())
+            elif t == "code_get":
+                await mike.send_code_state()
+            elif t == "window":
+                # The Mike window is in front and focused: the pet keeps quiet (no bubbles, hidden) so they don't double up.
+                mike.window_active = bool(data.get("active"))
+                await mike.send_pets({"type": "window_active", "on": mike.window_active})
+            elif t == "project_use" and data.get("path"):
+                projects.use(str(data["path"]))
+                await mike.send_code_state()
+            elif t == "project_new":
+                ok, res = await asyncio.get_running_loop().run_in_executor(
+                    None, projects.create, str(data.get("name", "")), str(data.get("template", "empty")), str(data.get("parent", "")))
+                await mike.send({"type": "code_toast", "text": f"Created {os.path.basename(res)}" if ok else res, "error": not ok})
+                await mike.send_code_state()
+            elif t == "project_open" and data.get("path"):
+                p = os.path.expanduser(str(data["path"]))
+                if os.path.isdir(p):
+                    projects.use(p)
+                else:
+                    await mike.send({"type": "code_toast", "text": f"{p} isn't a folder.", "error": True})
+                await mike.send_code_state()
+            elif t == "files_get":
+                await mike.send({"type": "files", "files": await asyncio.get_running_loop().run_in_executor(None, projects.files)})
+            elif t == "diff_get":
+                await mike.send({"type": "diff", "file": str(data.get("file", "")),
+                                 "text": await asyncio.get_running_loop().run_in_executor(None, projects.diff, str(data.get("file", "")))})
+            elif t == "file_read":
+                await mike.send({"type": "file", "file": str(data.get("file", "")),
+                                 "text": await asyncio.get_running_loop().run_in_executor(None, projects.read, str(data.get("file", "")))})
+            elif t == "git_commit":
+                msg = await asyncio.get_running_loop().run_in_executor(None, projects.commit, str(data.get("message", "")))
+                await mike.send({"type": "code_toast", "text": msg, "error": msg != "Committed."})
+                await mike.send_code_state()
+            elif t == "term_start":
+                msg = terminals.start(str(data.get("name") or "shell"), str(data.get("command") or ""), str(data.get("cwd") or (projects.info().get("path") or "")))
+                log.info("terminal: %s", msg)
+                await mike.send_code_state()
+            elif t == "term_send":
+                terminals.send(str(data.get("name", "")), str(data.get("text", "")), bool(data.get("enter", True)))
+            elif t == "term_key" and data.get("key") == "ctrl-c":
+                terminals.interrupt(str(data.get("name", "")))
+            elif t == "term_stop":
+                terminals.stop(str(data.get("name", "")))
+                await mike.send_code_state()
+            elif t == "term_show":
+                terminals.show(str(data.get("name", "")))
             elif t == "memory_add" and str(data.get("text", "")).strip():
                 memory.remember(str(data["text"]))
                 await mike.send(mike.memory_payload())
@@ -1419,6 +1605,8 @@ async def ws_endpoint(ws: WebSocket):
     finally:
         if mike.ws is ws:
             mike.ws = None
+            mike.window_active = False
+            await mike.send_pets({"type": "window_active", "on": False})
 
 
 @app.websocket("/ws/pet")
@@ -1428,7 +1616,7 @@ async def ws_pet(ws: WebSocket):
     mike.pets.add(ws)
     await ws.send_text(json.dumps({
         "type": "hello", "name": config.NAME, "state": mike.state, "present": mike.present,
-        "main": mike.ws is not None, **pet_settings(),
+        "main": mike.ws is not None, "window": getattr(mike, "window_active", False), **pet_settings(),
         "confirm": None if not mike.pending_confirm else {"id": mike.pending_confirm["id"]},
     }))
     try:
