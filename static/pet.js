@@ -30,6 +30,7 @@ function mood(now) {
   return "idle";
 }
 function wantVisible(now) {
+  if (S.dismissed) return false;     // sent away by voice; comes back the next time he's called
   if (S.mode === "off") return now < S.summonUntil;
   if (S.mode === "always") return true;
   return ACTIVE.has(S.state) || now < S.lingerUntil || now < S.summonUntil;
@@ -114,6 +115,11 @@ function handle(m) {
       break;
     case "presence":
       S.present = m.present;
+      break;
+    case "pet_dismiss":
+      S.dismissed = !!m.on;
+      if (S.dismissed) { S.summonUntil = 0; S.lingerUntil = 0; hideBubble(); }
+      else { S.summonUntil = now + 4000; hop(); }
       break;
   }
 }

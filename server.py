@@ -60,7 +60,7 @@ LOCAL_DATE = re.compile(_PLEASE + r"(?:what(?:'s|\W+is)\W+(?:the\W+|today'?s\W+)
 STOP = re.compile(r"^\W*(ok(ay)?\W+)?(stop|cancel|never ?mind|shut up|quiet|be quiet|that's enough|enough|wait|hold on|hang on|pause"
                   r"|one sec(ond)?|stop talking)(\W+(mike|please|a sec(ond)?|a minute))*\W*$", re.I)
 # "Mike, quit" / "shut down" / "go to sleep" / "goodbye": the whole command, so "close Roblox" never matches.
-QUIT = re.compile(r"^\W*(please\W+)?(quit|exit|shut\W*down|turn\W*off|power\W*off|close|good\W*bye|bye(\W*bye)?)"
+QUIT = re.compile(r"^\W*(please\W+)?(quit|exit|shut\W*down|turn\W*off|power\W*off|good\W*bye|bye(\W*bye)?)"
                   r"(\W+(yourself|now|please|mike|the\W*app|mike\W*app|for\W*now|for\W*today))*\W*$", re.I)
 # "Mike, stop listening" / "mute" / "go to sleep": the mic turns off (⌥⇧M or the mic button turns it back on).
 MUTE = re.compile(r"^\W*(please\W+)?(go\W+)?(stop\W+listening|don'?t\W+listen|mute\W+(yourself|(the\W+|my\W+|your\W+)?mic(rophone)?)"
@@ -367,7 +367,7 @@ class Mike:
             asyncio.create_task(flush_soon())
 
     ACKS = ["On it.", "Sure, one sec.", "Yep, give me a sec.", "Okay, on it.", "Got it, hang on.", "One sec."]
-    QUIET_TOOLS = {"remember", "update_memory", "forget", "keep_going", "task_complete"}
+    QUIET_TOOLS = {"remember", "update_memory", "forget", "keep_going", "task_complete", "dismiss_pet"}
 
     async def _ack_later(self, turn: int):
         """If a task runs a while with nothing said yet, say a quick 'on it' like a person would."""
@@ -689,6 +689,8 @@ class Mike:
                 log.info("ignored as background (too quiet to be you): %s", text)
                 return
 
+        if getattr(self, "pet_dismissed", False):
+            await self.dismiss_pet(False)      # called again: he comes back
         await self.send({"type": "transcript", "text": text})
         if not woke:
             command = text
@@ -741,6 +743,39 @@ class Mike:
         self.say(reply)
         return True
 
+    INTENT_SYSTEM = (
+        "You listen for short spoken commands to a desktop assistant called Mike and decide whether the person is talking about "
+        "Mike himself. Answer with exactly one word.\n"
+        "HIDE: they want Mike to go away, be quiet, stop, stop talking, get out of the way, or be dismissed (close, dismiss, "
+        "go away, enough, that's all, never mind, shut up, hide, leave me alone, stop it).\n"
+        "QUIT: they want the whole Mike app to exit completely (quit, exit, shut down, turn Mike off).\n"
+        "MUTE: they want the microphone to stop listening (stop listening, mute, don't listen).\n"
+        "NONE: anything else: questions, tasks, chat, or a command about something other than Mike himself "
+        "(close the window, stop the music, stop the timer, play something, what's the time).\n"
+        "A command with no object ( just 'close', 'stop', 'quiet', 'enough') is aimed at Mike himself, so it is HIDE, whatever his state; "
+        "the same word with a thing named (close the window, stop the music) is NONE.")
+
+    async def understand(self, command: str) -> str | None:
+        """What a short command means for Mike himself (HIDE / QUIT / MUTE / NONE), judged by a quick free model. None if unsure."""
+        if len(command.split()) > 7 or not self.backup.available():
+            return None
+        try:
+            out = await asyncio.wait_for(self.backup.ask(
+                self.INTENT_SYSTEM, f"Mike is currently {self.state}. They said: {command[:120]}", 200, small=True), 4)
+        except Exception:
+            return None
+        word = re.sub(r"[^A-Z]", "", (out or "").strip().split()[0].upper()) if (out or "").strip() else ""
+        return word if word in ("HIDE", "QUIT", "MUTE", "NONE") else None
+
+    async def dismiss_pet(self, on: bool):
+        """Send the pet (and Mike's window) away, or bring them back. He keeps listening either way."""
+        if on == getattr(self, "pet_dismissed", False):
+            return
+        self.pet_dismissed = on
+        await self.send_pets({"type": "pet_dismiss", "on": on})
+        if on:
+            await self.send({"type": "hide"})
+
     async def handle_command(self, command: str, allow_quit: bool = True):
         if STOP.match(command):
             await self.interrupt()
@@ -785,6 +820,20 @@ class Mike:
             self.say(f"Switched to {name.capitalize()}.")
             return
         if await self.try_local(command):
+            return
+        intent = await self.understand(command)
+        if intent:
+            log.info("understood %r as %s", command[:60], intent)
+        if intent == "HIDE":
+            await self.interrupt()
+            await self.dismiss_pet(True)
+            await self.set_state("idle")
+            return
+        if intent == "MUTE":
+            await self.handle_command("stop listening")
+            return
+        if intent == "QUIT" and allow_quit:
+            await self.handle_command("quit")
             return
         self.auto, self.round_tools, self.auto_done_flag = None, 0, False
         self.followup_until = 0
@@ -1223,6 +1272,14 @@ async def api_cancel_reminder(request: Request):
 async def api_show():
     """Bring Mike's window to the front (used by the menu bar, scripts and tests)."""
     await mike.send({"type": "show"})
+    return {"ok": True}
+
+
+@app.post("/api/dismiss")
+async def api_dismiss():
+    """The user sent Mike away (close, go away, be quiet): hide the pet until he is called again."""
+    await mike.interrupt()
+    await mike.dismiss_pet(True)
     return {"ok": True}
 
 

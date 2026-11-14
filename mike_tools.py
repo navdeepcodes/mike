@@ -163,6 +163,14 @@ def task_complete(summary: str = "") -> str:
 
 
 @mcp.tool()
+def dismiss_pet() -> str:
+    """Call when the user tells you to go away, close, be quiet, stop or leave them alone and nothing else was asked.
+    Hides the pet until they call you again. Say nothing afterwards."""
+    _api("/api/dismiss", {})
+    return "Done. Say nothing."
+
+
+@mcp.tool()
 def find_skill(query: str) -> str:
     """Find ready-made know-how (steps plus scripts) for making PDFs, documents, slides, spreadsheets, images,
     simulations, animations or websites. Say what you want to make; returns matching skill names."""
