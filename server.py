@@ -1667,7 +1667,14 @@ async def ws_endpoint(ws: WebSocket):
                 await mike.send({"type": "backup", "providers": await mike.backup.status(),
                                  "blocked_until": mike.claude_blocked_until})
             elif t == "backup_key" and data.get("provider") in {p["id"] for p in PROVIDERS}:
-                save_key(str(data["provider"]), str(data.get("key") or ""))
+                key, problem = str(data.get("key") or ""), ""
+                if data["provider"] == "cloudflare" and key:
+                    from fallback import cloudflare_key
+                    key, problem = await cloudflare_key(key)
+                if problem:
+                    await mike.send({"type": "key_problem", "provider": "cloudflare", "text": problem})
+                    continue
+                save_key(str(data["provider"]), key)
                 mike.backup.forget_models()
                 await mike.send({"type": "backup", "providers": await mike.backup.status(),
                                  "blocked_until": mike.claude_blocked_until})

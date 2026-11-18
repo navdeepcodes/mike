@@ -35,8 +35,10 @@ SECRETS = config.DATA / "secrets.json"
 # Tried in this order (your "Preferred model" in Settings goes first). Models are matched against what each
 # provider actually lists right now. "paid": billed to the user's own account; all others use free tiers only.
 PROVIDERS = [
-    {"id": "cloudflare", "name": "Cloudflare Workers AI", "signup": "https://dash.cloudflare.com/profile/api-tokens",
-     # Key is "ACCOUNT_ID:API_TOKEN". Free daily allowance on every Cloudflare account; no model listing on this endpoint.
+    {"id": "cloudflare", "name": "Cloudflare Workers AI", "signup": "https://dash.cloudflare.com/?to=/:account/ai/workers-ai",
+     "guide": "Sign up or log in, then on that page: Use REST API, Create a Workers AI API Token, Create. Paste the token here.",
+     # Stored as "ACCOUNT_ID:API_TOKEN" (the user pastes just the token; see cloudflare_key). Free daily allowance on
+     # every Cloudflare account; no model listing on this endpoint.
      "base": "https://api.cloudflare.com/client/v4/accounts/{account}/ai/v1", "no_list": True,
      "prefer": ["@cf/openai/gpt-oss-120b", "@cf/meta/llama-4-scout-17b-16e-instruct", "@cf/qwen/qwen3-30b-a3b-fp8",
                 "@cf/meta/llama-3.3-70b-instruct-fp8-fast", "@cf/mistralai/mistral-small-3.1-24b-instruct",
@@ -143,6 +145,44 @@ def preferred_first(lanes: list[tuple]) -> list[tuple]:
     """The provider picked in Settings goes first; the rest keep their order (stable)."""
     pref = getattr(config, "PREFERRED_PROVIDER", "")
     return sorted(lanes, key=lambda pm: pm[0]["id"] != pref) if pref else lanes
+
+
+CF_SETUP_URL = "https://dash.cloudflare.com/?to=/:account/ai/workers-ai"
+
+
+async def cloudflare_key(pasted: str) -> tuple[str, str]:
+    """Turn whatever the user pasted (a token; or token and account ID in any order, even a whole curl line)
+    into "ACCOUNT_ID:TOKEN". Returns (key, problem); finds the account ID itself when only a token was pasted."""
+    text = pasted.strip()
+    account = next(iter(re.findall(r"(?<![0-9a-f])[0-9a-f]{32}(?![0-9a-f])", text)), "")
+    tokens = [t for t in re.findall(r"[A-Za-z0-9_-]{30,}", text) if t != account and not re.fullmatch(r"[0-9a-f]{32}", t)]
+    if not tokens:
+        return "", "That doesn't look like a Cloudflare API token. Copy the token Cloudflare showed after you created it."
+    token = tokens[-1]
+    async with httpx.AsyncClient(timeout=10) as client:
+        h = {"Authorization": f"Bearer {token}"}
+        if not account:
+            try:
+                r = await client.get("https://api.cloudflare.com/client/v4/accounts", headers=h, params={"per_page": 5})
+                if any(e.get("code") in (9109, 6003, 1000) for e in (r.json().get("errors") or [])):
+                    return "", "Cloudflare says that token isn't valid. Copy it again right after clicking Create."
+                found = (r.json().get("result") or []) if r.status_code == 200 else []
+                account = found[0]["id"] if found else ""
+            except Exception:
+                account = ""
+        if not account:
+            return "", "Cloudflare didn't share the account ID with this token. Paste the Account ID from the same page too."
+        try:
+            r = await client.post(f"https://api.cloudflare.com/client/v4/accounts/{account}/ai/v1/chat/completions", headers=h,
+                                  json={"model": "@cf/openai/gpt-oss-20b", "max_tokens": 8,
+                                        "messages": [{"role": "user", "content": "Say OK"}]})
+        except Exception as e:
+            return "", f"Couldn't reach Cloudflare ({type(e).__name__}). Check the internet connection."
+    if r.status_code in (401, 403):
+        return "", "Cloudflare rejected that token. Create it with the Workers AI permission and paste it again."
+    if r.status_code == 404:
+        return "", "That account ID didn't match the token. Paste the Account ID shown on the Workers AI page."
+    return f"{account}:{token}", ""
 
 
 def load_keys() -> dict:
@@ -567,7 +607,7 @@ class FallbackBrain:
                 has = bool(p.get("local") or k)
                 model = await self.resolve_model(client, p) if has else None
                 out.append({"id": p["id"], "name": p["name"], "signup": p["signup"], "local": bool(p.get("local")),
-                            "paid": bool(p.get("paid")), "two_part": "{account}" in p.get("base", ""),
+                            "paid": bool(p.get("paid")), "guide": p.get("guide", ""),
                             "has_key": bool(k), "key_hint": f"••••{k[-4:]}" if len(k) > 8 else "",
                             "model": model, "ready": bool(model)})
         return out

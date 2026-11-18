@@ -298,6 +298,10 @@ function handle(m) {
     case "reminders": showReminders(m.items || []); break;
     case "history": showHistory(m); break;
     case "backup": showBackup(m); break;
+    case "key_problem":
+      document.querySelectorAll(`[data-err="${m.provider}"]`).forEach((n) => { n.textContent = m.text; });
+      document.querySelectorAll(".prov-key .save").forEach((b) => { b.textContent = "Save"; });
+      break;
     case "pet": showPet(m.pet, m.mode); break;
     case "voice": el.setVoice.value = m.voice; break;
     case "state": setState(m.state); if (m.state === "idle") refreshSoon(); break;
@@ -532,16 +536,30 @@ function renderProviders(target, providers) {
     row.querySelector("span").textContent = p.local ? `${state}. For offline use, run “ollama pull qwen3:8b” in Terminal (about 5 GB) and keep Ollama open.` : state;
     if (!p.local) {
       const box = document.createElement("div"); box.className = "prov-key";
-      box.innerHTML = (p.two_part ? `<input class="field acct" type="text" autocomplete="off" spellcheck="false" placeholder="Account ID">` : "")
-        + `<input class="field key" type="password" autocomplete="off" spellcheck="false"><button class="btn">Save</button><button class="link-btn">${p.paid ? "Get a key" : "Get a free key"}</button>`;
-      const input = box.querySelector(".key"), acct = box.querySelector(".acct");
-      input.placeholder = p.key_hint || (p.two_part ? "API token" : "Paste API key");
-      box.querySelector(".btn").onclick = () => {
-        const key = acct ? (acct.value.trim() && input.value.trim() ? `${acct.value.trim()}:${input.value.trim()}` : "") : input.value.trim();
-        if (!key) { (acct && !acct.value.trim() ? acct : input).focus(); return; }
-        send({ type: "backup_key", provider: p.id, key }); input.value = ""; if (acct) acct.value = "";
+      const guided = !!p.guide && !p.ready;
+      box.innerHTML = (guided ? `<button class="btn primary open">Open Cloudflare</button>` : "")
+        + `<input class="field key" type="password" autocomplete="off" spellcheck="false"><button class="btn save">Save</button>`
+        + (guided ? "" : `<button class="link-btn">${p.paid ? "Get a key" : "Get a free key"}</button>`);
+      const input = box.querySelector(".key");
+      input.placeholder = p.key_hint || (p.guide ? "Paste the token" : "Paste API key");
+      const save = () => {
+        const key = input.value.trim();
+        if (!key) { input.focus(); return; }
+        box.querySelector(".save").textContent = p.guide ? "Checking…" : "Save";
+        send({ type: "backup_key", provider: p.id, key }); input.value = "";
       };
-      box.querySelector(".link-btn").onclick = () => openUrl(p.signup);
+      box.querySelector(".save").onclick = save;
+      input.onkeydown = (e) => { if (e.key === "Enter") save(); };
+      if (p.guide) input.onpaste = () => setTimeout(save, 50);     // pasting is enough: no extra click
+      (box.querySelector(".open") || box.querySelector(".link-btn")).onclick = () => openUrl(p.signup);
+      if (guided) {
+        const g = document.createElement("div"); g.className = "prov-guide";
+        g.innerHTML = `<span></span><span class="prov-err" data-err="${p.id}"></span>`;
+        g.querySelector("span").textContent = p.guide;
+        row.append(box, g);
+        target.append(row);
+        continue;
+      }
       row.append(box);
     }
     target.append(row);
@@ -1034,7 +1052,9 @@ async function boot() {
     if (params.has("demo")) demo();
     if (params.has("os")) localize(params.get("os"));
     if (params.has("setup")) { el.setup.classList.remove("hidden"); S.claude = false;
-      showBackup({ providers: [{ id: "groq", name: "Groq", ready: params.get("setup") === "ready", model: "openai/gpt-oss-120b", has_key: params.get("setup") === "ready", key_hint: "••••8f2a", signup: "#" },
+      showBackup({ providers: [{ id: "cloudflare", name: "Cloudflare Workers AI", ready: false, has_key: false, signup: "#",
+          guide: "Sign up or log in, then on that page: Use REST API, Create a Workers AI API Token, Create. Paste the token here." },
+        { id: "groq", name: "Groq", ready: params.get("setup") === "ready", model: "openai/gpt-oss-120b", has_key: params.get("setup") === "ready", key_hint: "••••8f2a", signup: "#" },
         { id: "gemini", name: "Google Gemini", ready: false, has_key: false, signup: "#" }, { id: "openrouter", name: "OpenRouter", ready: false, has_key: false, signup: "#" },
         { id: "nvidia", name: "NVIDIA", ready: false, has_key: false, signup: "#" }] }); refreshSetup(); }
     if (params.has("confirm")) handle({ type: "confirm", id: "x", summary: "delete the file notes.txt", detail: '{\n  "command": "rm ~/notes.txt"\n}' });

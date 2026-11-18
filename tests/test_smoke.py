@@ -112,3 +112,10 @@ def test_provider_helpers(monkeypatch):
     assert fallback.preferred_first(lanes) == lanes
     gem = fallback._for_provider([{"role": "assistant", "tool_calls": [{"id": "1", "extra_content": {"anthropic": []}}]}], "gemini")
     assert gem[0]["tool_calls"][0]["extra_content"] == {"google": {"thought_signature": "skip_thought_signature_validator"}}
+
+
+def test_cloudflare_paste_needs_a_token():
+    import asyncio
+    import fallback
+    key, problem = asyncio.run(fallback.cloudflare_key("hello there"))
+    assert key == "" and "token" in problem
