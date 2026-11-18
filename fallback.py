@@ -75,6 +75,24 @@ def _strong(model: str) -> bool:
     return not re.search(r"lite|mini|nano|small|(?<!\d)(?:3|4|7|8|9|12|14|20)b\b", model.lower())
 
 
+def _for_provider(messages: list[dict], pid: str) -> list[dict]:
+    """Gemini rejects tool calls without its thought_signature (calls made by another model mid-task have none:
+    Google's documented placeholder skips the check). Other providers get no Gemini-only fields."""
+    out = []
+    for m in messages:
+        if m.get("tool_calls"):
+            calls = []
+            for c in m["tool_calls"]:
+                c = {k: v for k, v in c.items() if k != "extra_content"}
+                if pid == "gemini":
+                    orig = next((x for x in m["tool_calls"] if x.get("id") == c.get("id")), {})
+                    c["extra_content"] = orig.get("extra_content") or {"google": {"thought_signature": "skip_thought_signature_validator"}}
+                calls.append(c)
+            m = {**m, "tool_calls": calls}
+        out.append(m)
+    return out
+
+
 def _rank(pid: str, model: str, fallback: int) -> int:
     return next((i for i, (rp, rm) in enumerate(RANK) if rp == pid and model.startswith(rm)), 100 + fallback)
 
@@ -506,7 +524,11 @@ class FallbackBrain:
             log.warning("backup brain failed: %s", e)
             error = str(e)[:200]
         self.busy = False
-        self.history = self.history[-30:]
+        # Trim by whole turns, not raw messages: a 15+ step reply used to push your own request out of the
+        # last 30 messages, so "keep going" reached the model with no idea what the task was.
+        starts = [i for i, m in enumerate(self.history) if m["role"] == "user" and not m.get("nudge")]
+        if len(starts) > 6:
+            self.history = self.history[starts[-6]:]
         await self.on_done({"result": reply, "error": error, "duration_ms": int((time.time() - start) * 1000)})
 
     async def _run(self) -> str:
@@ -642,6 +664,7 @@ class FallbackBrain:
             body = {"model": model, "stream": True, "tools": TOOLS + (DEV_TOOLS if dev else []), "temperature": 0.2 if dev else 0.4, "max_tokens": 1200 if p["id"] == "groq" else 4000,   # reasoning models spend part of it thinking
                     
                     "messages": [{"role": "system", "content": system + ("\n\n" + DEV_PROMPT if dev and DEV_PROMPT not in system else "") + self._now_note()}] + self._payload_history()}
+            body["messages"] = _for_provider(body["messages"], p["id"])
             if p["id"] == "groq" and "gpt-oss" in model:
                 body["reasoning_effort"] = "high" if dev else "medium"     # think before acting: far fewer silly moves (more for code)
             text, calls = "", {}
@@ -694,11 +717,16 @@ class FallbackBrain:
                             if d.get("content"):
                                 await emit(d["content"])
                             for tc in d.get("tool_calls") or []:
-                                c = calls.setdefault(tc.get("index", 0), {"id": "", "name": "", "args": ""})
+                                idx = tc.get("index")
+                                if idx is None:   # Gemini sends each call whole, with no index: one slot per call id
+                                    idx = next((i for i, x in calls.items() if tc.get("id") and x["id"] == tc["id"]), len(calls))
+                                c = calls.setdefault(idx, {"id": "", "name": "", "args": "", "extra": None})
                                 c["id"] = tc.get("id") or c["id"]
                                 fn = tc.get("function") or {}
                                 c["name"] += fn.get("name") or ""
                                 c["args"] += fn.get("arguments") or ""
+                                if tc.get("extra_content"):   # Gemini's thought_signature: must be sent back unchanged
+                                    c["extra"] = tc["extra_content"]
             except (httpx.ConnectError, httpx.ReadTimeout, httpx.ConnectTimeout, httpx.RemoteProtocolError) as e:
                 if said or text:
                     raise RuntimeError(f"connection dropped mid-reply ({type(e).__name__})")
@@ -743,7 +771,8 @@ class FallbackBrain:
             said += text
             ordered = [calls[i] for i in sorted(calls)]
             self.history.append({"role": "assistant", "content": text or None, "tool_calls": [
-                {"id": c["id"] or f"call_{i}", "type": "function", "function": {"name": c["name"], "arguments": c["args"] or "{}"}}
+                {"id": c["id"] or f"call_{i}", "type": "function", "function": {"name": c["name"], "arguments": c["args"] or "{}"},
+                 **({"extra_content": c["extra"]} if c.get("extra") else {})}
                 for i, c in enumerate(ordered)]})
             used_tool = True
             for i, c in enumerate(ordered):

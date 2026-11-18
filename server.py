@@ -837,7 +837,9 @@ class Mike:
             return None
         try:
             out = await asyncio.wait_for(self.backup.ask(
-                self.INTENT_SYSTEM, f"Mike is currently {self.state}. They said: {command[:120]}", 200, small=True), 4)
+                self.INTENT_SYSTEM, f"Mike is currently {self.state}. They said: {command[:120]}", 200, small=True), 1.2)
+            # Capped short: every request waits on this, and a rate-limited free model used to add ~2.5 s.
+            # Timing out just means "not a HIDE/QUIT/MUTE command", so the brain answers as usual.
         except Exception:
             return None
         word = re.sub(r"[^A-Z]", "", (out or "").strip().split()[0].upper()) if (out or "").strip() else ""
