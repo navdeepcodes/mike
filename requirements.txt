@@ -1,14 +1,20 @@
+# Mike's Python packages. The installers (install.sh / install.ps1) install these into .venv.
 fastapi>=0.115
 uvicorn[standard]>=0.30
 numpy>=1.26
 webrtcvad-wheels>=2.0.14
-mlx-whisper>=0.4          # speech recognition on the Mac's GPU
 huggingface_hub>=0.24     # model downloads (once), then used offline
-faster-whisper>=1.1       # CPU fallback if mlx isn't available
+faster-whisper>=1.1       # speech recognition on the CPU (Windows, Linux, Intel Macs)
+mlx-whisper>=0.4 ; sys_platform == "darwin" and platform_machine == "arm64"   # faster, on Apple Silicon GPUs
 kokoro-onnx>=0.4          # Mike's voice
+sherpa-onnx               # recognising your voice
 mcp>=1.2,<2               # Mike's tools for Claude Code
-websockets>=12            # test scripts talk to Mike over /ws
-sherpa-onnx
+websockets>=12
+# Computer control on Windows/Linux (on a Mac, Mike.app does it natively)
+pyautogui>=0.9.54 ; sys_platform != "darwin"
+mss>=9 ; sys_platform != "darwin"
+psutil>=5.9 ; sys_platform != "darwin"
+# Making documents, slides, spreadsheets and charts
 reportlab
 pypdf
 pillow

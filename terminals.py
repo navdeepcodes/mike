@@ -5,20 +5,23 @@ They live in Mike's server, so they keep running between questions. Output is ke
 reading back, and mirrored to a log file so `show` can open it in a normal Terminal window with no macOS prompt.
 Sessions end when Mike restarts.
 """
-import fcntl
 import os
-import pty
 import re
 import signal
-import struct
 import subprocess
 import sys
-import termios
 import threading
 import time
 from pathlib import Path
 
 import config
+
+WINDOWS = os.name == "nt"
+if not WINDOWS:
+    import fcntl
+    import pty
+    import struct
+    import termios
 
 LOG_DIR = config.DATA / "terminals"
 MAX_SESSIONS = 8
@@ -44,9 +47,18 @@ class Session:
         self.log_path = LOG_DIR / f"{name}.log"
         LOG_DIR.mkdir(parents=True, exist_ok=True)
         self.log_path.write_text("")
+        env = {**os.environ, "TERM": "xterm-256color", "PYTHONUNBUFFERED": "1"}
+        if WINDOWS:
+            # No pseudo-terminals on Windows: a plain pipe works for servers, builds and test runs.
+            argv = ["cmd.exe", "/d", "/c", command] if command else ["cmd.exe", "/d", "/q"]
+            self.proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                         cwd=cwd or None, env=env,
+                                         creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW)
+            self.fd = None
+            threading.Thread(target=self._pump, daemon=True).start()
+            return
         master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 140, 0, 0))
-        env = {**os.environ, "TERM": "xterm-256color", "PYTHONUNBUFFERED": "1"}
         env["PATH"] = ":".join(["/opt/homebrew/bin", "/opt/homebrew/sbin", "/usr/local/bin", str(Path.home() / ".local/bin"),
                                 env.get("PATH", "/usr/bin:/bin")])
         argv = ["/bin/zsh", "-c", command] if command else ["/bin/zsh", "-i"]
@@ -62,8 +74,8 @@ class Session:
         with open(self.log_path, "ab", buffering=0) as log:
             while True:
                 try:
-                    data = os.read(self.fd, 4096)
-                except OSError:
+                    data = self.proc.stdout.read1(4096) if self.fd is None else os.read(self.fd, 4096)
+                except (OSError, ValueError):
                     break
                 if not data:
                     break
@@ -75,10 +87,11 @@ class Session:
         self.exit_code = self.proc.wait()
         if on_output:
             on_output(self.name)
-        try:
-            os.close(self.fd)
-        except OSError:
-            pass
+        if self.fd is not None:
+            try:
+                os.close(self.fd)
+            except OSError:
+                pass
 
     @property
     def running(self) -> bool:
@@ -91,9 +104,20 @@ class Session:
     def send(self, text: str, enter: bool = True):
         if not self.running:
             raise RuntimeError("that terminal has ended")
-        os.write(self.fd, (text + ("\n" if enter else "")).encode())
+        data = (text + ("\r\n" if WINDOWS else "\n") if enter else text).encode()
+        if self.fd is None:
+            if text == "\x03":
+                self.proc.send_signal(signal.CTRL_BREAK_EVENT)
+                return
+            self.proc.stdin.write(data)
+            self.proc.stdin.flush()
+        else:
+            os.write(self.fd, data)
 
     def stop(self):
+        if self.running and WINDOWS:
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(self.proc.pid)], capture_output=True)
+            return
         if self.running:
             try:
                 os.killpg(self.proc.pid, signal.SIGTERM)
@@ -190,6 +214,12 @@ def show(name: str) -> str:
     s = _sessions.get(_safe(name))
     if not s:
         return f"No terminal called '{name}'."
+    if WINDOWS:
+        subprocess.Popen(["powershell", "-NoProfile", "-Command", f"Start-Process powershell -ArgumentList '-NoExit','-Command','Get-Content -Wait -Tail 300 \"{s.log_path}\"'"],
+                         creationflags=subprocess.CREATE_NO_WINDOW)
+        return f"Opened '{s.name}' in a PowerShell window. It follows the output live (read only)."
+    if sys.platform != "darwin":
+        return f"Its output is saved at {s.log_path}."
     script = LOG_DIR / f"{s.name}.command"
     script.write_text(f"#!/bin/zsh\nprintf '\\033]0;Mike: {s.name}\\007'\ntail -n 300 -f '{s.log_path}'\n")
     script.chmod(0o755)

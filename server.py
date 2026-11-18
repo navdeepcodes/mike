@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import re
+import sys
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -19,6 +20,7 @@ from fastapi.responses import FileResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 import config
+import desktop
 import greetings
 import memory
 import random
@@ -197,6 +199,7 @@ class Mike:
         self.brain = Brain(self.on_delta, self.on_tool, self.on_done, self.on_permission,
                            self.on_log, self.on_usage)
         self.ears = Ears(self.on_heard, self.on_level)
+        self.ears.on_wake_hint = self.wake_hint
         self.voice_id = voiceprint.VoicePrint()
         # Backup brain (free cloud models, then local) for when Claude is unavailable.
         self.launched_hello = False
@@ -247,6 +250,19 @@ class Mike:
             except Exception:
                 self.pets.discard(pw)
 
+    async def wake_hint(self, on: bool):
+        """The quick pass heard the name: show the pet listening now instead of after the accurate pass.
+        Only the pet is told; Mike's own state changes once the accurate pass confirms (or the pet goes back)."""
+        if self.state != "idle":
+            return
+        await self.send({"type": "state", "state": "listening" if on else "idle"})
+        if on:
+            async def settle():
+                await asyncio.sleep(6)
+                if self.state == "idle":             # nothing came of it: don't leave the pet hanging
+                    await self.send({"type": "state", "state": "idle"})
+            asyncio.create_task(settle())
+
     async def set_state(self, state: str):
         if state != self.state:
             self.state = state
@@ -262,7 +278,7 @@ class Mike:
             until = float(info.get("resetsAt") or time.time() + 3600)
             fresh = until > self.claude_blocked_until + 60
             self.claude_blocked_until = until
-            when = time.strftime("%-I:%M %p", time.localtime(until))
+            when = time.strftime(config.tf("%-I:%M %p"), time.localtime(until))
             if config.BRAIN_MODE == "auto" and self.backup.available():
                 if fresh:
                     self.say(f"Claude's limit is used up, so I'm on my backup brain until {when}.")
@@ -456,8 +472,10 @@ class Mike:
         await self.send({"type": "assistant_done", **{k: info.get(k) for k in ("cost", "duration_ms", "error", "interrupted")}})
         if info.get("error") and not info.get("interrupted"):
             err = str(info["error"])
-            if self.active is self.backup and "No backup model" in err:
-                self.say("My backup brain isn't set up yet. Add a free key in Settings, under Model.")
+            if self.active is self.backup and ("No backup model" in err or "No model is set up" in err):
+                self.say("I don't have a brain set up yet. Add a free key in Settings, under Model, and I'm good to go.")
+            elif self.active is self.backup and not os.path.exists(config.CLAUDE_BIN):
+                self.say("My models are all busy right now. Try again in a minute.")
             elif self.active is self.backup:
                 self.say("Claude's out and my backup models are all busy right now. Try again in a minute.")
             else:
@@ -746,7 +764,7 @@ class Mike:
         await self.handle_command(command, allow_quit=woke)
 
     def use_backup(self) -> bool:
-        if config.BRAIN_MODE == "free":
+        if config.BRAIN_MODE == "free" or not os.path.exists(config.CLAUDE_BIN):   # no Claude Code: free models only
             return True
         return (config.BRAIN_MODE == "auto" and time.time() < self.claude_blocked_until
                 and bool(self.backup.available()))
@@ -756,9 +774,9 @@ class Mike:
         text = split_wake(command)[1] or command if split_wake(command)[0] else command
         reply = None
         if LOCAL_TIME.match(text):
-            reply = f"It's {time.strftime('%-I:%M %p')}."
+            reply = f"It's {time.strftime(config.tf('%-I:%M %p'))}."
         elif LOCAL_DATE.match(text):
-            reply = f"It's {time.strftime('%A, %-d %B')}."
+            reply = f"It's {time.strftime(config.tf('%A, %-d %B'))}."
         else:
             for rx, action, times, said in LOCAL_MEDIA:
                 if rx.match(text):
@@ -973,6 +991,8 @@ class Mike:
     @staticmethod
     async def idle_seconds() -> float:
         """Seconds since the last keyboard/mouse input (macOS HID idle time)."""
+        if not config.IS_MAC:
+            return desktop.idle_seconds()
         try:
             proc = await asyncio.create_subprocess_exec("ioreg", "-c", "IOHIDSystem", stdout=asyncio.subprocess.PIPE)
             out, _ = await proc.communicate()
@@ -1056,7 +1076,7 @@ class Mike:
         soon = [r for r in reminders.load() if r["due"] - time.time() < 3 * 3600]
         if soon:
             r = soon[0]
-            when = time.strftime("%-I:%M", time.localtime(r["due"]))
+            when = time.strftime(config.tf("%-I:%M"), time.localtime(r["due"]))
             return f"{hello} Heads up, {r['text']} at {when}."
         return hello
 
@@ -1136,11 +1156,14 @@ class Mike:
             line = random.choice([f"Hey, quick reminder: {text}.", f"Don't forget, {text}.",
                                   f"Yo, you asked me to remind you: {text}."])
         log.info("reminder due: %s", r)
-        try:
-            subprocess.Popen(["osascript", "-e", f'display notification {json.dumps(r["text"] or "Time")} '
-                              f'with title "Mike" subtitle {json.dumps(r["kind"].capitalize())} sound name "Glass"'])
-        except Exception:
-            pass
+        if config.IS_MAC:
+            try:
+                subprocess.Popen(["osascript", "-e", f'display notification {json.dumps(r["text"] or "Time")} '
+                                  f'with title "Mike" subtitle {json.dumps(r["kind"].capitalize())} sound name "Glass"'])
+            except Exception:
+                pass
+        else:
+            desktop.notify(f"Mike: {r['kind']}", r["text"] or "Time")
         await self.send({"type": "summon"})
         if self.state in ("idle", "listening"):
             self.offer_followup = True        # so "snooze it" / "thanks" works without the name
@@ -1152,6 +1175,8 @@ class Mike:
 
     # ---- screen (captured natively by Mike.app) ---------------------------
     async def screenshot(self) -> bytes | None:
+        if not config.IS_MAC:
+            return await asyncio.get_running_loop().run_in_executor(None, desktop.screenshot_jpeg)
         if not self.ws:
             return None
         sid = "s" + uuid.uuid4().hex[:8]
@@ -1167,6 +1192,8 @@ class Mike:
 
     # ---- computer control (Mike.app does it natively) ----------------------
     async def native(self, op: str, args: dict | None = None, timeout: float = 20) -> dict:
+        if not config.IS_MAC:     # Windows/Linux: Python does it (desktop.py) instead of Mike.app
+            return await asyncio.get_running_loop().run_in_executor(None, desktop.handle, op, args or {})
         if not self.ws:
             return {"error": "Mike's window isn't connected."}
         nid = "n" + uuid.uuid4().hex[:8]
@@ -1182,7 +1209,7 @@ class Mike:
 
     async def with_context(self, command: str) -> str:
         """Attach what the user is doing right now (time, front app, window, selected text)."""
-        bits = [time.strftime("%a %d %b, %-I:%M %p")]
+        bits = [time.strftime(config.tf("%a %d %b, %-I:%M %p"))]
         try:
             ctx = await self.native("context", timeout=0.6)
         except Exception:
@@ -1260,6 +1287,8 @@ def describe_action(tool: str, inp: dict) -> str:
 
 
 apply_saved_settings()   # model, voice speed, behaviour toggles you picked in Settings or by voice
+import models  # noqa: E402
+models.ensure()          # first run: fetch the voice models (normally the installer already did)
 mike = Mike()
 
 
@@ -1410,6 +1439,14 @@ async def api_self(request: Request):
     if not result.startswith("OK"):
         return {"text": "Not restarting: " + result}
     log.info("restarting on request (code check passed)")
+    if not config.IS_MAC:
+        # Start a fresh copy in 3 s (after this one has exited and freed the port), then exit.
+        relaunch = ("import subprocess,sys,time;time.sleep(3);"
+                    f"subprocess.Popen([sys.executable, {str(config.ROOT / 'server.py')!r}], cwd={str(config.ROOT)!r})")
+        subprocess.Popen([sys.executable, "-c", relaunch], cwd=str(config.ROOT),
+                         creationflags=getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        loop.call_later(1.0, os._exit, 0)
+        return {"text": "The code checks out. Mike restarts in about 3 seconds."}
     script = ("sleep 3; /usr/bin/pkill -x Mike; sleep 1; P=$(/usr/sbin/lsof -ti tcp:%d -sTCP:LISTEN); [ -n \"$P\" ] && kill $P; "
               "sleep 2; /usr/bin/open \"$HOME/Applications/Mike.app\"" % config.PORT)
     subprocess.Popen(["/bin/sh", "-c", script], start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

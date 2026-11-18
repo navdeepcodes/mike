@@ -10,3 +10,7 @@ __pycache__/
 *.pyc
 app/build/
 workspace/
+.pytest_cache/
+*.part
+.DS_Store
+bench/

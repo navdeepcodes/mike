@@ -111,30 +111,42 @@ def save_key(provider: str, key: str):
     else:
         keys.pop(provider, None)
     SECRETS.write_text(json.dumps(keys, indent=2))
-    os.chmod(SECRETS, 0o600)
+    try:
+        os.chmod(SECRETS, 0o600)
+    except OSError:
+        pass
 
 
 # ---- tools ----------------------------------------------------------------------
-_ENV = dict(os.environ, PATH=str(config.ROOT / ".venv" / "bin") + ":/opt/homebrew/bin:/usr/local/bin:" + os.environ.get("PATH", "/usr/bin:/bin:/usr/sbin:/sbin"))
+_EXTRA = [] if config.IS_WIN else ["/opt/homebrew/bin", "/usr/local/bin"]
+_ENV = dict(os.environ, PATH=os.pathsep.join([str(config.ROOT / ".venv" / config.VENV_BIN), *_EXTRA,
+                                               os.environ.get("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")]))
+
+
+def _shell(command: str) -> list[str]:
+    if config.IS_WIN:
+        return ["powershell", "-NoProfile", "-NonInteractive", "-Command", command]
+    return ["/bin/zsh" if config.IS_MAC else "/bin/bash", "-c", command]
 
 
 def run_command(command: str, cwd: str = "") -> str:
-    """Run a shell command on the user's Mac (zsh) and return its output. Use for opening apps
-    (open -a "App"), files, AppleScript (osascript), system info, builds and tests (cwd = the project folder).
+    """Run a shell command on the user's computer (zsh on a Mac, PowerShell on Windows) and return its output.
+    Use for opening apps, files, system info, builds and tests (cwd = the project folder).
     Anything long-running (a server, a watcher) belongs in terminal_start instead."""
     try:
         where = os.path.expanduser(cwd) if cwd and os.path.isdir(os.path.expanduser(cwd)) else str(config.HOME)
         env = _ENV
         if where != str(config.HOME):
             # A project runs with its own Python, not Mike's (whose packages are Mike's, not the project's).
-            mine = str(config.ROOT / ".venv" / "bin")
-            theirs = os.path.join(where, ".venv", "bin")
+            mine = str(config.ROOT / ".venv" / config.VENV_BIN)
+            theirs = os.path.join(where, ".venv", config.VENV_BIN)
             inside_mike = os.path.realpath(where).startswith(str(config.ROOT))
-            parts = [q for q in _ENV["PATH"].split(":") if q != mine]
-            env = dict(_ENV, PATH=":".join(([theirs] if os.path.isdir(theirs) else []) + ([mine] if inside_mike else []) + parts))
+            parts = [q for q in _ENV["PATH"].split(os.pathsep) if q != mine]
+            env = dict(_ENV, PATH=os.pathsep.join(([theirs] if os.path.isdir(theirs) else []) + ([mine] if inside_mike else []) + parts))
         # Not a login shell: profile scripts print their own noise, which models read as "it failed".
-        r = subprocess.run(["/bin/zsh", "-c", command], capture_output=True, text=True, timeout=120,
-                           cwd=where, env=env)
+        r = subprocess.run(_shell(command), capture_output=True, text=True, timeout=120,
+                           cwd=where, env=env, encoding="utf-8", errors="replace",
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     except subprocess.TimeoutExpired:
         return "Timed out after 120 seconds. If it is meant to keep running, start it with terminal_start instead."
     out, err = r.stdout.strip(), r.stderr.strip()
@@ -285,7 +297,10 @@ DEV_NAMES = {f.__name__ for f in DEV_FUNCS}
 TOOLS = [_schema(f) for f in TOOL_FUNCS.values() if f.__name__ not in DEV_NAMES]
 DEV_TOOLS = [_schema(f) for f in DEV_FUNCS]
 
-BACKUP_PERSONA = f"""You are {config.NAME}, the user's AI companion on their Mac, like FRIDAY for Iron Man. Your words
+_BACKUP_TOOLS = 'Tools: run_command (zsh), read_file, ui/press/set_text/menu/type_text/press_key to operate any app\n(ui lists an app\'s buttons/fields with [ids]; press/set_text act on those ids), media keys, reminders,\nmemory (remember lasting facts they tell you; recall past conversations).\nRecipes:\n- Open an app: run_command open -a "App". Web search: open "https://www.google.com/search?q=..." (or youtube.com/results?search_query=...).\n- Play music: run_command open "spotify:search:WHAT" then ui(app="Spotify", find="Play") and press a\n  matching "Play ..." button (not the bottom bar). For a vibe ("something nice"), search a playlist like "chill vibes".\n  Pause/next: ui(app="Spotify", find="Pause"/"Next") and press. media keys are only a fallback.\n' if config.IS_MAC else 'Tools: run_command (PowerShell), read_file, screenshot then click/type_text/press_key/scroll to operate any app,\nmedia keys (volume and playback), reminders, memory (remember lasting facts they tell you; recall past conversations).\nRecipes:\n- Open an app: run_command Start-Process "app" (Start-Process "spotify:", Start-Process notepad). Web search:\n  Start-Process "https://www.google.com/search?q=..." (or youtube.com/results?search_query=...).\n- Play music: Start-Process "spotify:search:WHAT", then screenshot and click the play button you see.\n'
+_BACKUP_RECIPES = '- Volume: run_command osascript -e "set volume output volume 40".\n- Weather: run_command curl -s "wttr.in/?format=%l:+%C+%t". Battery: pmset -g batt.\n- Files: mdfind -name "..." or mdfind "kind:pdf topic"; read PDFs with pdftotext FILE - | head -200.\n' if config.IS_MAC else '- Volume: media volume_up / volume_down / mute with times=N (each step is about 2%).\n- Weather: run_command curl.exe -s "wttr.in/?format=%l:+%C+%t". Battery: (Get-CimInstance Win32_Battery).EstimatedChargeRemaining.\n- Files: Get-ChildItem -Path $HOME -Recurse -Filter "*name*" -ErrorAction SilentlyContinue | Select-Object -First 20.\n'
+
+BACKUP_PERSONA = f"""You are {config.NAME}, the user's AI companion on their {config.MACHINE}, like FRIDAY for Iron Man. Your words
 are spoken aloud. Talk like a sharp, warm friend their age: short (one or two sentences), casual, real
 reactions, no markdown, lists, emoji or URLs. Never invent facts, plans or events about their life.
 Don't tack on filler like "Let me know if you need anything else" or "What's next?"; just stop.
@@ -297,15 +312,7 @@ Only do what they asked: no extra reminders or actions they didn't ask for.
 If what they said sounds like a mishearing or isn't meant for you, ask briefly.
 Use the conversation so far: "it", "that", "the exam" refer to what was just discussed.
 
-Tools: run_command (zsh), read_file, ui/press/set_text/menu/type_text/press_key to operate any app
-(ui lists an app's buttons/fields with [ids]; press/set_text act on those ids), media keys, reminders,
-memory (remember lasting facts they tell you; recall past conversations).
-Recipes:
-- Open an app: run_command open -a "App". Web search: open "https://www.google.com/search?q=..." (or youtube.com/results?search_query=...).
-- Play music: run_command open "spotify:search:WHAT" then ui(app="Spotify", find="Play") and press a
-  matching "Play ..." button (not the bottom bar). For a vibe ("something nice"), search a playlist like "chill vibes".
-  Pause/next: ui(app="Spotify", find="Pause"/"Next") and press. media keys are only a fallback.
-- Never change the Mac's microphone input volume or system mic settings, even if asked to mute or silence the mic: Mike's own mute handles that, and zeroing the system mic leaves him deaf. Speaker/output volume is fine.
+{_BACKUP_TOOLS}- Never change the {config.MACHINE}'s microphone input volume or system mic settings, even if asked to mute or silence the mic: Mike's own mute handles that, and zeroing the system mic leaves him deaf. Speaker/output volume is fine.
 - "Go quiet", "shut up", "be quiet" or "sleep" means stop talking right now. It is not a mode: the next time the user speaks to you, answer normally. Never say you are muted, on mute, asleep or paused (you can't know that; the real mute is handled outside you, and if you can hear the user you are not muted). A question like "what's one plus one" gets its answer, nothing more.
 - The user's words come from speech recognition and are sometimes garbled ("Watch one, bless one" was "what's one plus one"). Work out the most likely everyday request from the words, the sounds and the context, and answer that. If two readings are plausible, ask one short question ("One plus one?"). Never start looking at the screen or camera, or run tools, just because the words were odd; only look when they clearly asked you to.
 - Act first, talk last: don't narrate steps or ask what looking would answer; do it, check it, then say one short
@@ -316,10 +323,7 @@ Recipes:
   match and follow it. Skills make the result far better. Write files with write_file (not shell heredocs), run scripts with run_command
   (python3), check the file exists, then open it. Save in ~/Documents/Mike unless told otherwise.
 - Servers, watchers and anything that keeps running: terminal_start, then terminal_read (wait 3 to 5), then terminal_stop. Never use Terminal.app, `open -a Terminal` or AppleScript for that.
-- Volume: run_command osascript -e "set volume output volume 40".
-- Weather: run_command curl -s "wttr.in/?format=%l:+%C+%t". Battery: pmset -g batt.
-- Files: mdfind -name "..." or mdfind "kind:pdf topic"; read PDFs with pdftotext FILE - | head -200.
-- Reminders: set_reminder with the exact time they said; to change one, cancel_reminder then set_reminder.
+{_BACKUP_RECIPES}- Reminders: set_reminder with the exact time they said; to change one, cancel_reminder then set_reminder.
 The "Right now" note tells you the time, the app they're in and any selected text: use it silently,
 never read it out. After acting, say what happened in one short line.
 """
@@ -587,6 +591,9 @@ class FallbackBrain:
                         self.failed_until[f"{p['id']}/{model}"] = time.time() + min(max(wait, 5), 600)
                     else:                     # provider down or key rejected: skip it for a while
                         self.failed_until[p["id"]] = time.time() + 300
+        if not any(load_keys().get(p["id"]) for p in PROVIDERS if not p.get("local")):
+            raise RuntimeError("No model is set up yet. Add a free key in Settings > Model (Groq and Gemini take a minute "
+                               "to get), start Ollama, or install Claude Code.")
         raise RuntimeError(f"All backup models are unavailable right now ({last_err or 'none reachable'}).")
 
     async def ask(self, system: str, user: str, max_tokens: int = 300, small: bool = False) -> str | None:

@@ -99,4 +99,4 @@ def describe(r: dict) -> str:
     days = (d.date() - datetime.now().date()).days
     day = "today" if days == 0 else "tomorrow" if days == 1 else d.strftime("%a %d %b")
     rep = f", repeats {r['repeat']}" if r.get("repeat") else ""
-    return f"[{r['id']}] {r['kind']} {day} at {d:%-I:%M %p}{rep}: {r['text']}"
+    return f"[{r['id']}] {r['kind']} {day} at {d.strftime(config.tf('%-I:%M %p'))}{rep}: {r['text']}"

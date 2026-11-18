@@ -194,6 +194,8 @@ def consolidate() -> dict:
         convo = "\n".join(f"[{e['t'][:16]}] User: {e['user'][:500]}\nMike: {e['mike'][:500]}" for e in talk[-60:])
         known = "\n".join(f"- {f}" for f in facts()) or "- (none yet)"
         prompt = f"Known facts:\n{known}\n\nNew conversation:\n{convo}"
+        if not os.path.exists(config.CLAUDE_BIN):
+            return {"skipped": "needs Claude Code"}
         env = {k: v for k, v in os.environ.items() if not (k.startswith("ANTHROPIC_") or k.startswith("CLAUDE"))}
         args = [config.CLAUDE_BIN, "-p", "--output-format", "json", "--model", "claude-haiku-5-5",
                 "--tools", "", "--strict-mcp-config", "--setting-sources", "project,local",

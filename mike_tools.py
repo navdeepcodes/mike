@@ -40,8 +40,10 @@ def screenshot():
         with urllib.request.urlopen(f"{MIKE_URL}/api/screenshot", timeout=14) as r:
             return Image(data=r.read(), format="jpeg")
     except Exception:
-        return ("I can't see the screen yet. Tell the user, in one sentence: turn on Mike under System Settings > "
-                "Privacy & Security > Screen & System Audio Recording, then quit and reopen Mike.")
+        if os.name != "nt" and __import__("sys").platform == "darwin":
+            return ("I can't see the screen yet. Tell the user, in one sentence: turn on Mike under System Settings > "
+                    "Privacy & Security > Screen & System Audio Recording, then quit and reopen Mike.")
+        return "I can't see the screen right now (the screenshot failed)."
 
 
 def _native(op: str, **args):
@@ -52,7 +54,7 @@ def _native(op: str, **args):
         with urllib.request.urlopen(req, timeout=25) as r:
             out = json.loads(r.read() or b"{}")
     except Exception as e:
-        return {"error": f"Mike.app didn't answer ({e}). It must be running."}
+        return {"error": f"Mike didn't answer ({e}). He must be running."}
     return out
 
 
@@ -141,7 +143,7 @@ def media(action: str, times: int = 1) -> str:
     """Press a hardware media key, exactly like the keyboard's top row. Works for whatever is playing
     (Spotify, Music, YouTube in a browser...). action: play_pause, next, previous, volume_up,
     volume_down, mute, brightness_up, brightness_down. times: repeat (each volume step ~6%,
-    each brightness step ~6%). For an exact volume use osascript "set volume output volume N"."""
+    each brightness step ~6%; brightness is Mac-only). On a Mac, an exact volume is osascript "set volume output volume N"."""
     return _say(_native("media", action=action, times=times), "Done.")
 
 
@@ -336,11 +338,9 @@ def recall(query: str = "") -> str:
 
 @mcp.tool()
 def notify(title: str, message: str) -> str:
-    """Show a macOS notification banner."""
-    def esc(s: str) -> str:
-        return s.replace("\\", "\\\\").replace('"', '\\"')
-    subprocess.run(["osascript", "-e",
-                    f'display notification "{esc(message)}" with title "{esc(title)}"'], timeout=10)
+    """Show a desktop notification banner."""
+    import desktop
+    desktop.notify(title, message)
     return "Notification shown."
 
 

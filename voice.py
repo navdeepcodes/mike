@@ -157,6 +157,8 @@ async def synth(text: str) -> bytes | None:
 
 
 async def _say_wav(text: str) -> bytes | None:
+    if not config.IS_MAC:      # the built-in `say` voice is Mac-only; Kokoro is the voice everywhere else
+        return None
     fd, out = tempfile.mkstemp(prefix="mike_", suffix=".wav")
     os.close(fd)
     fd, src = tempfile.mkstemp(prefix="mike_", suffix=".txt")

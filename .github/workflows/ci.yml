@@ -1,0 +1,81 @@
+name: CI
+on:
+  push:
+  pull_request:
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install (Windows installer, no models or shortcuts)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          MIKE_NO_MODELS: "1"
+          MIKE_NO_SHORTCUTS: "1"
+        run: ./install.ps1
+      - name: Install (macOS/Linux installer, no models)
+        if: runner.os != 'Windows'
+        env:
+          MIKE_NO_MODELS: "1"
+          MIKE_NO_APP: "1"
+        run: ./install.sh
+      - name: Build Mike.app (macOS, without installing it)
+        if: runner.os == 'macOS'
+        run: ./app/build.sh --no-install
+      - name: Tests
+        shell: bash
+        run: |
+          PY=.venv/bin/python; [ -f .venv/Scripts/python.exe ] && PY=.venv/Scripts/python.exe
+          $PY -m pip install -q pytest
+          $PY -m pytest -q tests
+      - name: Server imports
+        shell: bash
+        run: |
+          PY=.venv/bin/python; [ -f .venv/Scripts/python.exe ] && PY=.venv/Scripts/python.exe
+          $PY -c "import ast,glob; [ast.parse(open(f,encoding='utf-8').read()) for f in glob.glob('*.py')]; import desktop, launch, models, terminals, fallback, reminders, memory; print('ok')"
+
+  performance:
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install with the real installer (timed)
+        shell: pwsh
+        env:
+          MIKE_NO_SHORTCUTS: "1"
+          MIKE_NO_APP: "1"
+        run: |
+          $t = Get-Date
+          if ($IsWindows) { ./install.ps1 } else { bash ./install.sh }
+          "Install took $([int]((Get-Date) - $t).TotalSeconds) s (packages + 150 MB of models)" | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
+      - name: Performance
+        shell: bash
+        run: |
+          PY=.venv/bin/python; [ -f .venv/Scripts/python.exe ] && PY=.venv/Scripts/python.exe
+          $PY tests/perf.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: perf-${{ matrix.os }}
+          path: |
+            data/perf.json
+            data/perf-server.log
