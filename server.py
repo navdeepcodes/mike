@@ -19,6 +19,7 @@ from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 
+import browser
 import config
 import desktop
 import greetings
@@ -1190,6 +1191,36 @@ class Mike:
         finally:
             self.snapshots.pop(sid, None)
 
+    # ---- Mike's own browser ------------------------------------------------------------
+    BROWSER_OPS = {"open": lambda a: browser.open(str(a.get("url", ""))),
+                   "read": lambda a: browser.read(str(a.get("find", ""))),
+                   "click": lambda a: browser.click(int(a.get("element", 0))),
+                   "type": lambda a: browser.type_into(int(a.get("element", 0)), str(a.get("text", "")), bool(a.get("submit"))),
+                   "scroll": lambda a: browser.scroll(str(a.get("direction", "down"))),
+                   "key": lambda a: browser.key(str(a.get("key", "Enter"))),
+                   "back": lambda a: browser.back(),
+                   "tab": lambda a: browser.tab(int(a.get("index", 0))),
+                   "close": lambda a: browser.close()}
+
+    async def browser_op(self, op: str, args: dict) -> str:
+        """One browser action, after the safety check (payments, sending, deleting ask; secrets are refused)."""
+        fn = self.BROWSER_OPS.get(op)
+        if not fn:
+            return f"Unknown browser action {op}."
+        loop = asyncio.get_running_loop()
+        try:
+            verdict, why = await loop.run_in_executor(None, browser.check, op, args)
+            if verdict == "refuse":
+                return why
+            if verdict == "ask":
+                ok = await self.on_permission("Browser", {"_ask": True, "summary": why})
+                if ok is not True:
+                    return "The user said no, so it wasn't done. Don't try another way."
+            return await loop.run_in_executor(None, fn, args)
+        except Exception as e:
+            log.info("browser %s failed: %s", op, e)
+            return f"The browser couldn't do that: {str(e).splitlines()[0][:300]}"
+
     # ---- computer control (Mike.app does it natively) ----------------------
     async def native(self, op: str, args: dict | None = None, timeout: float = 20) -> dict:
         if not config.IS_MAC:     # Windows/Linux: Python does it (desktop.py) instead of Mike.app
@@ -1260,6 +1291,8 @@ SENSITIVE_PATH = re.compile(r"/\.ssh/|/\.aws/|/\.gnupg/|\.env(\.|$)|/\.zshrc$|/\
 
 
 def is_sensitive(tool: str, inp: dict) -> bool:
+    if tool == "Browser":
+        return bool(inp.get("_ask"))
     if tool == "Bash":
         return bool(SENSITIVE_CMD.search(str(inp.get("command", ""))))
     if tool in ("Write", "Edit", "MultiEdit", "NotebookEdit"):
@@ -1282,6 +1315,8 @@ def describe_action(tool: str, inp: dict) -> str:
         return f"edit the file {base(inp.get('file_path'))}"
     if tool == "NotebookEdit":
         return f"edit the notebook {base(inp.get('notebook_path'))}"
+    if tool == "Browser":
+        return str(inp.get("summary") or "do that on the website")
     pretty = tool.replace("mcp__", "").replace("__", " ").replace("_", " ")
     return f"use {pretty}"
 
@@ -1479,6 +1514,21 @@ async def api_auto(request: Request):
         mike.auto = None
         mike.auto_done_flag = True
     return {"ok": True}
+
+
+@app.post("/api/browser")
+async def api_browser(request: Request):
+    b = await request.json()
+    return {"text": await mike.browser_op(str(b.get("op", "")), b.get("args") or {})}
+
+
+@app.get("/api/browser/screenshot")
+async def api_browser_screenshot():
+    try:
+        jpg = await asyncio.get_running_loop().run_in_executor(None, browser.screenshot)
+    except Exception as e:
+        return PlainTextResponse(f"browser not open: {e}", status_code=503)
+    return Response(jpg, media_type="image/jpeg")
 
 
 @app.post("/api/native")

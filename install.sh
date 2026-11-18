@@ -59,6 +59,10 @@ if [[ "${MIKE_NO_MODELS:-}" != "1" ]]; then
   say "Downloading the voice models (~150 MB, once)"
   .venv/bin/python models.py || echo "  (Mike will retry the download when he starts.)"
 fi
+if [[ "${MIKE_NO_BROWSER:-}" != "1" ]]; then
+  say "Setting up Mike's own browser (Chromium, ~150 MB, once)"
+  .venv/bin/python -m playwright install chromium >/dev/null || echo "  (Mike will set it up the first time he browses.)"
+fi
 
 # ---- the app --------------------------------------------------------------------------------
 if [[ "$(uname)" == "Darwin" ]]; then

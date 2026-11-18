@@ -10,6 +10,7 @@ kokoro-onnx>=0.4          # Mike's voice
 sherpa-onnx               # recognising your voice
 mcp>=1.2,<2               # Mike's tools for Claude Code
 websockets>=12
+playwright>=1.45        # Mike's own browser (Chromium is downloaded by the installer)
 # Computer control on Windows/Linux (on a Mac, Mike.app does it natively)
 pyautogui>=0.9.54 ; sys_platform != "darwin"
 mss>=9 ; sys_platform != "darwin"

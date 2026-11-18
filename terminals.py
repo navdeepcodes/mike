@@ -61,7 +61,8 @@ class Session:
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 140, 0, 0))
         env["PATH"] = ":".join(["/opt/homebrew/bin", "/opt/homebrew/sbin", "/usr/local/bin", str(Path.home() / ".local/bin"),
                                 env.get("PATH", "/usr/bin:/bin")])
-        argv = ["/bin/zsh", "-c", command] if command else ["/bin/zsh", "-i"]
+        sh = "/bin/zsh" if os.path.exists("/bin/zsh") else "/bin/bash"
+        argv = [sh, "-c", command] if command else [sh, "-i"]
         # The child gets its own session with this terminal as its controlling one, so Ctrl-C works.
         wrapper = "import os,sys,fcntl,termios;os.setsid();fcntl.ioctl(0,termios.TIOCSCTTY,0);os.execvp(sys.argv[1],sys.argv[1:])"
         self.proc = subprocess.Popen([sys.executable, "-c", wrapper, *argv], stdin=slave, stdout=slave, stderr=slave,

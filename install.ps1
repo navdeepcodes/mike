@@ -92,6 +92,11 @@ if (-not $NoModels) {
     & $venvPy models.py
     if ($LASTEXITCODE -ne 0) { Write-Host "  (Mike will retry the download when he starts.)" -ForegroundColor Yellow }
 }
+if ($env:MIKE_NO_BROWSER -ne "1") {
+    Say "Setting up Mike's own browser (Chromium, ~150 MB, once)"
+    & $venvPy -m playwright install chromium | Out-Null
+    if ($LASTEXITCODE -ne 0) { Write-Host "  (Mike will set it up the first time he browses.)" -ForegroundColor Yellow }
+}
 
 # ---- shortcuts ------------------------------------------------------------------------------
 if (-not $NoShortcuts) {

@@ -22,12 +22,14 @@ jobs:
         env:
           MIKE_NO_MODELS: "1"
           MIKE_NO_SHORTCUTS: "1"
+          MIKE_NO_BROWSER: "1"
         run: ./install.ps1
       - name: Install (macOS/Linux installer, no models)
         if: runner.os != 'Windows'
         env:
           MIKE_NO_MODELS: "1"
           MIKE_NO_APP: "1"
+          MIKE_NO_BROWSER: "1"
         run: ./install.sh
       - name: Build Mike.app (macOS, without installing it)
         if: runner.os == 'macOS'

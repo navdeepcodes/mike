@@ -14,7 +14,7 @@ from mcp.server.fastmcp import FastMCP, Image
 import memory
 import skills
 
-MIKE_URL = os.environ.get("MIKE_URL", "http://127.0.0.1:8777")
+MIKE_URL = os.environ.get("MIKE_URL", f"http://127.0.0.1:{os.environ.get('MIKE_PORT', '8777')}")
 mcp = FastMCP("mike")
 
 
@@ -264,11 +264,11 @@ def use_skill(name: str) -> str:
 
 
 # ---- reminders / timers / alarms -----------------------------------------------
-def _api(path: str, body: dict | None = None) -> dict:
+def _api(path: str, body: dict | None = None, timeout: float = 10) -> dict:
     req = urllib.request.Request(f"{MIKE_URL}{path}", data=json.dumps(body).encode() if body is not None else None,
                                  headers={"Content-Type": "application/json"})
     try:
-        with urllib.request.urlopen(req, timeout=10) as r:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
             return json.loads(r.read() or b"{}")
     except Exception as e:
         return {"error": str(e)}
@@ -334,6 +334,80 @@ def recall(query: str = "") -> str:
     if hits:
         out.append("Past conversation:\n" + memory.format_entries(hits, 400))
     return "\n\n".join(out) or "Nothing found about that."
+
+
+# ---- Mike's own browser ------------------------------------------------------------------
+def _browse(op: str, **args) -> str:
+    out = _api("/api/browser", {"op": op, "args": args}, timeout=240)
+    return out.get("text") or out.get("error") or "No answer from the browser."
+
+
+@mcp.tool()
+def browser_open(url: str) -> str:
+    """Open a website (or search the web if it isn't a URL) in Mike's own browser window, which the user can
+    watch. Returns the page text and its links, buttons and fields with [ids]. Use this to do things on the web."""
+    return _browse("open", url=url)
+
+
+@mcp.tool()
+def browser_read(find: str = "") -> str:
+    """Read the browser's current page again: text plus every link, button and field with an [id].
+    find: only list elements whose label contains these words (e.g. "add to cart")."""
+    return _browse("read", find=find)
+
+
+@mcp.tool()
+def browser_click(element: int) -> str:
+    """Click a link or button by its [id] from browser_open/browser_read. Buying, paying, sending, posting
+    and deleting ask the user first automatically."""
+    return _browse("click", element=element)
+
+
+@mcp.tool()
+def browser_type(element: int, text: str, submit: bool = False) -> str:
+    """Type into a field by [id] (or pick a dropdown option by its text). submit=true presses Enter.
+    Never for passwords or card numbers: the user types those in the browser window."""
+    return _browse("type", element=element, text=text, submit=submit)
+
+
+@mcp.tool()
+def browser_scroll(direction: str = "down") -> str:
+    """Scroll the page: down, up, top, bottom. Returns what is visible now."""
+    return _browse("scroll", direction=direction)
+
+
+@mcp.tool()
+def browser_key(key: str) -> str:
+    """Press a key in the page: Enter, Escape, Tab, ArrowDown, or a shortcut like Control+A."""
+    return _browse("key", key=key)
+
+
+@mcp.tool()
+def browser_back() -> str:
+    """Go back to the previous page."""
+    return _browse("back")
+
+
+@mcp.tool()
+def browser_tab(index: int = 0) -> str:
+    """Switch to browser tab number index (1 = first). index=0 lists the open tabs."""
+    return _browse("tab", index=index)
+
+
+@mcp.tool()
+def browser_screenshot():
+    """See the browser page as an image (for layouts, pictures, maps). browser_read is faster for text."""
+    try:
+        with urllib.request.urlopen(f"{MIKE_URL}/api/browser/screenshot", timeout=30) as r:
+            return Image(data=r.read(), format="jpeg")
+    except Exception as e:
+        return f"The browser isn't open ({e})."
+
+
+@mcp.tool()
+def browser_close() -> str:
+    """Close Mike's browser window."""
+    return _browse("close")
 
 
 @mcp.tool()

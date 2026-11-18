@@ -264,6 +264,8 @@ TOOL_FUNCS = {f.__name__: f for f in [
     mike_tools.press_key, mike_tools.media,
     mike_tools.set_reminder, mike_tools.list_reminders, mike_tools.cancel_reminder,
     mike_tools.remember, mike_tools.recall, edit_file, *BASE_TERMINAL,
+    mike_tools.browser_open, mike_tools.browser_read, mike_tools.browser_click, mike_tools.browser_type,
+    mike_tools.browser_scroll, mike_tools.browser_back,
 ]}
 # Software-building tools: offered only on programming requests (every tool description costs free-tier tokens).
 DEV_FUNCS = [search_code, mike_tools.project_find, mike_tools.project_use, mike_tools.project_info,
@@ -323,7 +325,10 @@ Use the conversation so far: "it", "that", "the exam" refer to what was just dis
   match and follow it. Skills make the result far better. Write files with write_file (not shell heredocs), run scripts with run_command
   (python3), check the file exists, then open it. Save in ~/Documents/Mike unless told otherwise.
 - Servers, watchers and anything that keeps running: terminal_start, then terminal_read (wait 3 to 5), then terminal_stop. Never use Terminal.app, `open -a Terminal` or AppleScript for that.
-{_BACKUP_RECIPES}- Reminders: set_reminder with the exact time they said; to change one, cancel_reminder then set_reminder.
+{_BACKUP_RECIPES}- Doing things on websites (look something up, fill a form, compare prices, check an order): browser_open, then act on
+  [ids] with browser_click / browser_type, and browser_read to look again. It's your own browser window the user can watch.
+  Never type passwords or card numbers; ask them to type those in that window. Risky clicks ask them automatically.
+- Reminders: set_reminder with the exact time they said; to change one, cancel_reminder then set_reminder.
 The "Right now" note tells you the time, the app they're in and any selected text: use it silently,
 never read it out. After acting, say what happened in one short line.
 """

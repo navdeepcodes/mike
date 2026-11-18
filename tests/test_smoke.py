@@ -64,3 +64,10 @@ def test_no_personal_paths_in_code():
     home = str(Path.home())
     for f in ROOT.glob("*.py"):
         assert home not in f.read_text(encoding="utf-8"), f
+
+
+def test_browser_safety_rules():
+    import browser
+    assert browser.RISKY_CLICK.search("Place your order") and browser.RISKY_CLICK.search("Buy now")
+    assert not browser.RISKY_CLICK.search("Reviews")
+    assert browser.SECRET_FIELD.search("password pw") and browser.SECRET_FIELD.search("cc-number")
