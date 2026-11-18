@@ -499,6 +499,7 @@ el.setClose.onclick = closeSettings;
 el.settings.onclick = (e) => { if (e.target === el.settings) closeSettings(); };
 
 // ------------------------------------------------------------------ backup brain (free models)
+el.setProvider.onchange = () => setSetting("preferred_provider", el.setProvider.value);
 el.setBrainMode.onclick = (e) => { const b = e.target.closest("button[data-v]"); if (b) setSetting("brain_mode", b.dataset.v); };
 function openUrl(url) { if (native) nativeCall("open_url", { url }); else window.open(url, "_blank"); }
 function showBackup(m) {
@@ -508,6 +509,14 @@ function showBackup(m) {
     ? `${blocked ? "In use now. " : ""}Ready: ${ready.map((p) => p.name).join(", ")}.`
     : "Add a free key below to turn it on.";
   renderProviders(el.providers, m.providers || []);
+  el.setProvider.innerHTML = "";
+  el.setProvider.append(new Option("Automatic (fastest available)", ""));
+  for (const p of m.providers || []) {
+    const o = new Option(`${p.name}${p.ready ? "" : " (add a key first)"}`, p.id);
+    o.disabled = !p.ready && p.id !== S.settings.preferred_provider;
+    el.setProvider.append(o);
+  }
+  el.setProvider.value = S.settings.preferred_provider || "";
   if (!el.setup.classList.contains("hidden")) renderProviders(el.setupProviders, (m.providers || []).filter((p) => !p.local));
   S.brainReady = S.claude || ready.length > 0;
   refreshSetup();
@@ -516,16 +525,22 @@ function renderProviders(target, providers) {
   target.innerHTML = "";
   for (const p of providers) {
     const row = document.createElement("div"); row.className = "perm";
-    const state = p.ready ? `Ready · ${p.model}` : p.local ? "Not running, or no model downloaded" : p.has_key ? "Key didn't work" : "No key yet";
+    const cost = p.paid ? "Paid · billed to your account" : p.local ? "" : "Free";
+    const state = p.ready ? `Ready · ${p.model}` : p.local ? "Not running, or no model downloaded" : p.has_key ? "Key didn't work" : `No key yet${cost ? " · " + cost : ""}`;
     row.innerHTML = `<div class="p-text"><b></b><span></span></div>`;
     row.querySelector("b").textContent = p.name;
     row.querySelector("span").textContent = p.local ? `${state}. For offline use, run “ollama pull qwen3:8b” in Terminal (about 5 GB) and keep Ollama open.` : state;
     if (!p.local) {
       const box = document.createElement("div"); box.className = "prov-key";
-      box.innerHTML = `<input class="field" type="password" autocomplete="off" spellcheck="false"><button class="btn">Save</button><button class="link-btn">Get a free key</button>`;
-      const input = box.querySelector("input");
-      input.placeholder = p.key_hint || "Paste API key";
-      box.querySelector(".btn").onclick = () => { send({ type: "backup_key", provider: p.id, key: input.value.trim() }); input.value = ""; };
+      box.innerHTML = (p.two_part ? `<input class="field acct" type="text" autocomplete="off" spellcheck="false" placeholder="Account ID">` : "")
+        + `<input class="field key" type="password" autocomplete="off" spellcheck="false"><button class="btn">Save</button><button class="link-btn">${p.paid ? "Get a key" : "Get a free key"}</button>`;
+      const input = box.querySelector(".key"), acct = box.querySelector(".acct");
+      input.placeholder = p.key_hint || (p.two_part ? "API token" : "Paste API key");
+      box.querySelector(".btn").onclick = () => {
+        const key = acct ? (acct.value.trim() && input.value.trim() ? `${acct.value.trim()}:${input.value.trim()}` : "") : input.value.trim();
+        if (!key) { (acct && !acct.value.trim() ? acct : input).focus(); return; }
+        send({ type: "backup_key", provider: p.id, key }); input.value = ""; if (acct) acct.value = "";
+      };
       box.querySelector(".link-btn").onclick = () => openUrl(p.signup);
       row.append(box);
     }

@@ -316,6 +316,8 @@
           <p class="sec-note">When your Claude limit runs out or Claude can't be reached, Mike keeps going on free models: cloud first, then a model on your Mac if you're offline. He switches back to Claude by himself.</p>
           <div class="row"><div class="row-text"><b>Use the backup</b><span id="backupState">Add a free key below to turn it on.</span></div>
             <div class="seg" id="setBrainMode"><button data-v="auto">Automatically</button><button data-v="claude">Never</button><button data-v="free">Always</button></div></div>
+          <div class="row"><div class="row-text"><b>Preferred model</b><span>Answers first. The others take over when it's busy or out of free use.</span></div>
+            <select class="field select" id="setProvider"></select></div>
           <div class="perms" id="providers"></div>
         </section>
 
@@ -406,7 +408,7 @@
         <li class="step" id="stepBrain">
           <span class="step-num" aria-hidden="true">2</span>
           <div class="step-body"><b>Give him a brain</b>
-            <span id="setupBrainText">Paste a free key from any provider below. Each takes about a minute, no card needed; add two so he can switch when one is busy. Have Claude? Install Claude Code and Mike uses it automatically.</span>
+            <span id="setupBrainText">Cloudflare Workers AI is the default: free with any Cloudflare account. Or paste a free key from another provider; add two so he can switch when one is busy. GPT and Claude API keys work too (billed to your account), and with Claude Code installed Mike uses your Claude plan.</span>
             <div class="perms" id="setupProviders"></div></div>
         </li>
       </ol>

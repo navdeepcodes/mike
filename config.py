@@ -107,6 +107,7 @@ GREET_AFTER_AWAY_MIN = 180  # only greet you after a real break (3 hours away, e
 BREAK_NUDGE_MIN = 120       # after this long working nonstop, suggest a short break (0 = never)
 BRAIN_MODE = "auto"         # "auto": Claude, then free backup models when Claude is unavailable;
                             # "claude": Claude only; "free": backup models only (saves your Claude limit)
+PREFERRED_PROVIDER = "cloudflare"   # which model provider answers first once its key is added (Settings > Model)
 WAKE_WORD = True            # respond when someone says "Mike" (off = only ⌥Space / the pet / typing)
 VOICE_MATCH = True          # follow-ups and talking over Mike only work in your voice (TV/videos are ignored)
 BARGE_IN = True             # you can talk over Mike and he stops to listen

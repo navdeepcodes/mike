@@ -22,6 +22,7 @@ from typing import Awaitable, Callable
 
 import httpx
 
+import anthropic_provider
 import config
 import memory
 import mike_tools
@@ -31,8 +32,15 @@ import skills
 log = logging.getLogger("mike.fallback")
 SECRETS = config.DATA / "secrets.json"
 
-# Tried in this order. Models are matched against what each provider actually lists right now.
+# Tried in this order (your "Preferred model" in Settings goes first). Models are matched against what each
+# provider actually lists right now. "paid": billed to the user's own account; all others use free tiers only.
 PROVIDERS = [
+    {"id": "cloudflare", "name": "Cloudflare Workers AI", "signup": "https://dash.cloudflare.com/profile/api-tokens",
+     # Key is "ACCOUNT_ID:API_TOKEN". Free daily allowance on every Cloudflare account; no model listing on this endpoint.
+     "base": "https://api.cloudflare.com/client/v4/accounts/{account}/ai/v1", "no_list": True,
+     "prefer": ["@cf/openai/gpt-oss-120b", "@cf/meta/llama-4-scout-17b-16e-instruct", "@cf/qwen/qwen3-30b-a3b-fp8",
+                "@cf/meta/llama-3.3-70b-instruct-fp8-fast", "@cf/mistralai/mistral-small-3.1-24b-instruct",
+                "@cf/openai/gpt-oss-20b"]},
     {"id": "groq", "name": "Groq", "base": "https://api.groq.com/openai/v1", "signup": "https://console.groq.com/keys",
      # Each model has its own per-minute limit on the free tier, so these act as separate lanes.
      "prefer": ["openai/gpt-oss-120b", "qwen/qwen3", "moonshotai/kimi-k2", "openai/gpt-oss-20b", "llama-3.3-70b-versatile"]},
@@ -54,6 +62,11 @@ PROVIDERS = [
      "signup": "https://aistudio.google.com/apikey", "prefer": ["gemini-flash-latest"],
      # Google retires model names every few months: take the newest stable flash models it lists, verified below.
      "pattern": r"^gemini-(\d+(?:\.\d+)?)-flash(-lite)?$"},
+    {"id": "openai", "name": "OpenAI (GPT)", "base": "https://api.openai.com/v1", "signup": "https://platform.openai.com/api-keys",
+     "paid": True, "exact": True, "max_completion": True,
+     "prefer": ["gpt-5.1-mini", "gpt-5-mini", "gpt-5.1", "gpt-5", "gpt-4.1-mini", "gpt-4o-mini"]},
+    {"id": "anthropic", "name": "Anthropic (Claude API)", "signup": "https://console.anthropic.com/settings/keys",
+     "paid": True, "kind": "anthropic", "base": "", "prefer": anthropic_provider.MODELS},
     {"id": "ollama", "name": "Local (Ollama)", "base": "http://127.0.0.1:11434/v1", "signup": "", "local": True,
      "prefer": ["qwen3.5", "qwen3", "llama3", "gemma3", "mistral"]},
 ]
@@ -61,7 +74,7 @@ PROVIDERS = [
 
 # Across providers, smartest-and-quick first. Groq's free tier allows only a few requests a minute per
 # model, so when its best model is busy we go to another provider's big model, not Groq's smaller ones.
-RANK = [("groq", "openai/gpt-oss-120b"), ("nvidia", "nvidia/nemotron-3-ultra"), ("nvidia", "mistralai/mistral-large-4"),
+RANK = [("cloudflare", "@cf/openai/gpt-oss-120b"), ("groq", "openai/gpt-oss-120b"), ("nvidia", "nvidia/nemotron-3-ultra"), ("nvidia", "mistralai/mistral-large-4"),
         ("openrouter", "nvidia/nemotron-3-ultra"), ("groq", "moonshotai/kimi-k2"), ("groq", "qwen/qwen3"),
         ("nvidia", "deepseek-ai/deepseek-v3"), ("openrouter", "google/gemma-4-31b"), ("gemini", "gemini-")]
 
@@ -91,7 +104,8 @@ def _for_provider(messages: list[dict], pid: str) -> list[dict]:
                 c = {k: v for k, v in c.items() if k != "extra_content"}
                 if pid == "gemini":
                     orig = next((x for x in m["tool_calls"] if x.get("id") == c.get("id")), {})
-                    c["extra_content"] = orig.get("extra_content") or {"google": {"thought_signature": "skip_thought_signature_validator"}}
+                    g = (orig.get("extra_content") or {}).get("google")
+                    c["extra_content"] = {"google": g or {"thought_signature": "skip_thought_signature_validator"}}
                 calls.append(c)
             m = {**m, "tool_calls": calls}
         out.append(m)
@@ -100,6 +114,35 @@ def _for_provider(messages: list[dict], pid: str) -> list[dict]:
 
 def _rank(pid: str, model: str, fallback: int) -> int:
     return next((i for i, (rp, rm) in enumerate(RANK) if rp == pid and model.startswith(rm)), 100 + fallback)
+
+
+def _key(p: dict, key: str) -> str:
+    return key.split(":", 1)[1] if p["id"] == "cloudflare" and ":" in key else key
+
+
+def _base(p: dict, key: str = "") -> str:
+    if "{account}" in p["base"]:
+        return p["base"].format(account=(key or load_keys().get(p["id"], "")).split(":", 1)[0])
+    return p["base"]
+
+
+def _auth(p: dict, key: str) -> dict:
+    return {"Authorization": f"Bearer {_key(p, key)}"} if key else {}
+
+
+def _body(p: dict, body: dict) -> dict:
+    """Per-provider request quirks: OpenAI's newer models take max_completion_tokens and no custom temperature."""
+    if p.get("max_completion"):
+        body = {k: v for k, v in body.items() if k != "temperature"}
+        if "max_tokens" in body:
+            body["max_completion_tokens"] = body.pop("max_tokens")
+    return body
+
+
+def preferred_first(lanes: list[tuple]) -> list[tuple]:
+    """The provider picked in Settings goes first; the rest keep their order (stable)."""
+    pref = getattr(config, "PREFERRED_PROVIDER", "")
+    return sorted(lanes, key=lambda pm: pm[0]["id"] != pref) if pref else lanes
 
 
 def load_keys() -> dict:
@@ -410,6 +453,10 @@ class _ProviderDown(Exception):
     pass
 
 
+class _Skip(Exception):
+    """Internal: this round was already answered by a non-OpenAI-style provider."""
+
+
 class FallbackBrain:
     def __init__(self, on_delta: Callable[[str], Awaitable[None]], on_tool: Callable[[str, dict], Awaitable[None]],
                  on_done: Callable[[dict], Awaitable[None]], on_permission: Callable[[str, dict], Awaitable[bool]]):
@@ -435,10 +482,22 @@ class FallbackBrain:
 
     async def resolve_model(self, client: httpx.AsyncClient, p: dict) -> str | None:
         """Finds every preferred model the provider offers right now; returns the best one."""
+        if p["id"] not in self.models and p.get("kind") == "anthropic":
+            key = load_keys().get(p["id"], "")
+            picks = await anthropic_provider.check(key, p["prefer"]) if key else []
+            if not picks:
+                return None
+            self.models[p["id"]] = picks[:4]
+        if p["id"] not in self.models and p.get("no_list"):
+            key = load_keys().get(p["id"], "")
+            picks = await self._verify(client, p, key, p["prefer"][:6])
+            if not picks:
+                return None
+            self.models[p["id"]] = picks[:4]
         if p["id"] not in self.models:
             key = load_keys().get(p["id"], "")
             try:
-                r = await client.get(f"{p['base']}/models", headers={"Authorization": f"Bearer {key}"} if key else {}, timeout=6)
+                r = await client.get(f"{_base(p, key)}/models", headers=_auth(p, key), timeout=6)
                 r.raise_for_status()
                 ids = [m.get("id", "") for m in (r.json().get("data") or [])]
                 if p.get("only"):
@@ -476,9 +535,9 @@ class FallbackBrain:
         async def ok(m):
             t0 = time.time()
             try:
-                r = await client.post(f"{p['base']}/chat/completions", headers={"Authorization": f"Bearer {key}"}, timeout=12,
-                                      json={"model": m, "max_tokens": 4, "tools": [tool],
-                                            "messages": [{"role": "user", "content": "Reply OK"}]})
+                r = await client.post(f"{_base(p, key)}/chat/completions", headers=_auth(p, key), timeout=12,
+                                      json=_body(p, {"model": m, "max_tokens": 16, "tools": [tool],
+                                                     "messages": [{"role": "user", "content": "Reply OK"}]}))
                 # 429 = a real model that is just busy right now; but "limit: 0" means this key has no access to it at all.
                 self._lat[m] = time.time() - t0
                 return r.status_code == 200 or (r.status_code == 429 and "limit: 0" not in r.text)
@@ -508,6 +567,7 @@ class FallbackBrain:
                 has = bool(p.get("local") or k)
                 model = await self.resolve_model(client, p) if has else None
                 out.append({"id": p["id"], "name": p["name"], "signup": p["signup"], "local": bool(p.get("local")),
+                            "paid": bool(p.get("paid")), "two_part": "{account}" in p.get("base", ""),
                             "has_key": bool(k), "key_hint": f"••••{k[-4:]}" if len(k) > 8 else "",
                             "model": model, "ready": bool(model)})
         return out
@@ -581,6 +641,7 @@ class FallbackBrain:
                 if await self.resolve_model(client, p):
                     lanes += [(p, m) for m in self.lanes(p)]
             lanes.sort(key=lambda pm: _rank(pm[0]["id"], pm[1], len(lanes)))   # stable: provider order breaks ties
+            lanes = preferred_first(lanes)
             if time.time() < self.dev_until:                  # programming wants the strongest models, not the fastest small ones
                 lanes = [l for l in lanes if _strong(l[1])] or lanes
             for p, model in lanes:
@@ -618,6 +679,7 @@ class FallbackBrain:
                 if await self.resolve_model(client, p):
                     lanes += [(p, m) for m in self.lanes(p)]
             lanes.sort(key=lambda pm: _rank(pm[0]["id"], pm[1], len(lanes)))
+            lanes = preferred_first(lanes)
             if small:
                 # A short yes/no-style question: the smallest model answers fastest, and using it
                 # leaves the big one's per-minute allowance for the real answer.
@@ -629,8 +691,12 @@ class FallbackBrain:
                 if p["id"] == "groq" and "gpt-oss" in model:
                     body["reasoning_effort"] = "low"
                 try:
-                    r = await client.post(f"{p['base']}/chat/completions", json=body,
-                                          headers={"Authorization": f"Bearer {key}"} if key else {})
+                    if p.get("kind") == "anthropic":
+                        text = await anthropic_provider.ask(key, model, system, user, max_tokens)
+                        if text:
+                            return text
+                        continue
+                    r = await client.post(f"{_base(p, key)}/chat/completions", json=_body(p, body), headers=_auth(p, key))
                     r.raise_for_status()
                     text = ((r.json().get("choices") or [{}])[0].get("message") or {}).get("content") or ""
                     if text.strip():
@@ -662,7 +728,7 @@ class FallbackBrain:
     async def _loop(self, client, p, model, system) -> str:
         """Model ↔ tools until it answers in text (max 10 rounds)."""
         key = load_keys().get(p["id"], "")
-        headers = {"Authorization": f"Bearer {key}"} if key else {}
+        headers = _auth(p, key)
         seen: dict[str, str] = {}            # tool call -> result, to stop "open -a Spotify" x9 loops
         try:
             return await self._rounds(client, p, model, system, headers, self._request_text(), seen, {}, set())
@@ -712,8 +778,21 @@ class FallbackBrain:
                 self._acted = True
                 await self.on_delta(piece)
 
+            if p.get("kind") == "anthropic":
+                try:
+                    got, raw = await anthropic_provider.turn(
+                        load_keys().get(p["id"], ""), model, body["messages"][0]["content"], self._payload_history(),
+                        body["tools"], emit, max_tokens=16000 if dev else 8000, effort="medium" if dev else "low")
+                except anthropic_provider.ProviderDown as e:
+                    raise _ProviderDown(str(e))
+                for i, c in enumerate(got):
+                    calls[i] = {**c, "extra": {"anthropic": raw} if i == 0 else None}
+                got = None
             try:
-                async with client.stream("POST", f"{p['base']}/chat/completions", json=body, headers=headers) as r:
+                if p.get("kind") == "anthropic":
+                    raise _Skip()
+                async with client.stream("POST", f"{_base(p, load_keys().get(p['id'], ''))}/chat/completions",
+                                         json=_body(p, body), headers=headers) as r:
                     if r.status_code >= 400:
                         detail = (await r.aread()).decode(errors="replace")[:400]
                         if r.headers.get("retry-after"):
@@ -744,6 +823,8 @@ class FallbackBrain:
                                 c["args"] += fn.get("arguments") or ""
                                 if tc.get("extra_content"):   # Gemini's thought_signature: must be sent back unchanged
                                     c["extra"] = tc["extra_content"]
+            except _Skip:
+                pass
             except (httpx.ConnectError, httpx.ReadTimeout, httpx.ConnectTimeout, httpx.RemoteProtocolError) as e:
                 if said or text:
                     raise RuntimeError(f"connection dropped mid-reply ({type(e).__name__})")

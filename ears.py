@@ -143,8 +143,13 @@ class Ears:
                 log.exception("mlx whisper unavailable; falling back to faster-whisper")
         log.info("loading whisper %s", config.WHISPER_MODEL)
         self.model = WhisperModel(config.WHISPER_MODEL, device="cpu", compute_type="int8")
+        # Background speech is screened by a much smaller model first (~0.3 s vs ~1-2.5 s on a laptop CPU):
+        # only speech that mentions the name, or comes while Mike is listening for you, gets the accurate one.
+        self.screen = WhisperModel("base.en", device="cpu", compute_type="int8") if config.WHISPER_MODEL != "base.en" else None
         # Warm up so the first real command is fast.
-        self.model.transcribe(np.zeros(RATE, dtype=np.float32), language="en")
+        for m in (self.model, self.screen):
+            if m:
+                m.transcribe(np.zeros(RATE, dtype=np.float32), language="en")
         log.info("whisper ready")
 
     async def run(self):
@@ -283,9 +288,24 @@ class Ears:
                 log.info("short name heard by quick pass: %r", qtext)
                 return config.NAME
             return text
-        # faster-whisper (Windows, Linux, Intel Macs): one accurate pass, same name prompt as on Apple Silicon.
+        # faster-whisper (Windows, Linux, Intel Macs): a quick screening pass for background speech, then one
+        # accurate pass, with the same name prompt as on Apple Silicon.
+        if not attentive and getattr(self, "screen", None):
+            t = time.time()
+            qsegs, _ = self.screen.transcribe(audio, language="en", beam_size=1, vad_filter=True,
+                                              condition_on_previous_text=False, initial_prompt=ADDRESS_HINT)
+            qtext = " ".join(x.text for x in qsegs).strip()
+            unsure = not qtext and len(audio) < RATE * 3 and loudness_db(pcm) >= -40
+            if not unsure and not self.screen_re.search(qtext):
+                log.info("ignored (no name, %.2fs): %r", time.time() - t, qtext[:80])
+                self.bg_levels = (self.bg_levels + [loudness_db(pcm)])[-40:]
+                return ""
+            if self.on_wake_hint and self.wake_re.search(qtext) and getattr(self, "loop", None):
+                self._hinted = True
+                asyncio.run_coroutine_threadsafe(self.on_wake_hint(True), self.loop)
+                log.info("timing: name heard by quick pass in %.2fs, pet shown", time.time() - t)
         segments, _ = self.model.transcribe(
-            audio, language="en", beam_size=3, vad_filter=True,
+            audio, language="en", beam_size=1, vad_filter=True,
             condition_on_previous_text=False, initial_prompt=ADDRESS_HINT,
         )
         kept = []

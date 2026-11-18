@@ -71,3 +71,44 @@ def test_browser_safety_rules():
     assert browser.RISKY_CLICK.search("Place your order") and browser.RISKY_CLICK.search("Buy now")
     assert not browser.RISKY_CLICK.search("Reviews")
     assert browser.SECRET_FIELD.search("password pw") and browser.SECRET_FIELD.search("cc-number")
+
+
+def test_claude_api_message_conversion():
+    import anthropic_provider as ap
+    chat = [
+        {"role": "user", "content": "open notes"},
+        {"role": "assistant", "content": "On it.", "tool_calls": [
+            {"id": "call:1", "type": "function", "function": {"name": "run_command", "arguments": '{"command": "ls"}'}},
+            {"id": "call_2", "type": "function", "function": {"name": "read_file", "arguments": "{bad"}}]},
+        {"role": "tool", "tool_call_id": "call:1", "content": "a.txt"},
+        {"role": "tool", "tool_call_id": "call_2", "content": "Failed: nope"},
+        {"role": "assistant", "content": "Done."},
+    ]
+    out = ap.messages(chat)
+    assert [m["role"] for m in out] == ["user", "assistant", "user", "assistant"]
+    uses = [b for b in out[1]["content"] if b["type"] == "tool_use"]
+    assert uses[0]["id"] == "call_1" and uses[0]["input"] == {"command": "ls"} and uses[1]["input"] == {}
+    results = out[2]["content"]
+    assert [r["tool_use_id"] for r in results] == ["call_1", "call_2"] and results[1]["is_error"] is True
+    raw = [{"type": "thinking", "thinking": "", "signature": "sig"}, {"type": "tool_use", "id": "toolu_1", "name": "x", "input": {}}]
+    replay = ap.messages([{"role": "user", "content": "hi"}, {"role": "assistant", "content": None, "tool_calls": [
+        {"id": "toolu_1", "type": "function", "function": {"name": "x", "arguments": "{}"}, "extra_content": {"anthropic": raw}}]}])
+    assert replay[1]["content"] == raw                      # Claude's own blocks come back unchanged
+    t = ap.tools([{"type": "function", "function": {"name": "x", "description": "d", "parameters": {"type": "object"}}}])
+    assert t[0]["eager_input_streaming"] is True and t[0]["input_schema"] == {"type": "object"}
+
+
+def test_provider_helpers(monkeypatch):
+    import fallback
+    cf = next(p for p in fallback.PROVIDERS if p["id"] == "cloudflare")
+    oa = next(p for p in fallback.PROVIDERS if p["id"] == "openai")
+    assert fallback._base(cf, "acc123:tok") == "https://api.cloudflare.com/client/v4/accounts/acc123/ai/v1"
+    assert fallback._auth(cf, "acc123:tok") == {"Authorization": "Bearer tok"}
+    assert fallback._body(oa, {"max_tokens": 5, "temperature": 0.4, "model": "m"}) == {"max_completion_tokens": 5, "model": "m"}
+    lanes = [(oa, "a"), (cf, "b")]
+    monkeypatch.setattr(config, "PREFERRED_PROVIDER", "cloudflare")
+    assert fallback.preferred_first(lanes)[0][0]["id"] == "cloudflare"
+    monkeypatch.setattr(config, "PREFERRED_PROVIDER", "")
+    assert fallback.preferred_first(lanes) == lanes
+    gem = fallback._for_provider([{"role": "assistant", "tool_calls": [{"id": "1", "extra_content": {"anthropic": []}}]}], "gemini")
+    assert gem[0]["tool_calls"][0]["extra_content"] == {"google": {"thought_signature": "skip_thought_signature_validator"}}

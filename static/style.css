@@ -530,3 +530,5 @@ body:not([data-os="mac"]) .mac-only { display: none !important; }
 #setupProviders .p-text { flex: 1 1 100%; flex-direction: row; justify-content: space-between; align-items: baseline; gap: 10px; }
 #setupProviders .prov-key { flex: 1 1 100%; }
 #setupProviders .prov-key .field { flex: 1; }
+.prov-key .field.acct { width: 130px; }
+#setupProviders .prov-key .field.acct { flex: 0 1 140px; }

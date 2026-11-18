@@ -35,13 +35,17 @@ Nothing is installed system-wide.
 Then:
 
 1. Open **Mike** (Applications on a Mac, Start menu on Windows). A short setup asks for the microphone and a brain:
-   - **Free:** Settings > Model > add a free key from [Groq](https://console.groq.com/keys),
-     [Gemini](https://aistudio.google.com/apikey), [OpenRouter](https://openrouter.ai/keys),
-     [OpenCode Zen](https://opencode.ai/auth) or [NVIDIA](https://build.nvidia.com). Add two or three: Mike
-     switches between them when one is busy, and only ever uses their free models.
-     [Ollama](https://ollama.com) works too, fully offline.
-   - **Claude:** install [Claude Code](https://docs.claude.com/en/docs/claude-code) and log in. Mike uses
-     your plan and falls back to the free models when you hit a limit.
+   - **Free (default): [Cloudflare Workers AI](https://dash.cloudflare.com/profile/api-tokens).** Any free Cloudflare
+     account comes with a daily allowance. Paste your account ID and an API token with "Workers AI" access.
+   - **Other free models:** [Groq](https://console.groq.com/keys), [Gemini](https://aistudio.google.com/apikey),
+     [OpenRouter](https://openrouter.ai/keys), [OpenCode Zen](https://opencode.ai/auth) or
+     [NVIDIA](https://build.nvidia.com). Add two or three: Mike switches when one is busy, and only uses free models there.
+   - **GPT or Claude by API key:** [OpenAI](https://platform.openai.com/api-keys) or
+     [Anthropic](https://console.anthropic.com/settings/keys), billed to your account.
+   - **Your Claude plan:** install [Claude Code](https://docs.claude.com/en/docs/claude-code) and log in. Mike uses
+     it first and falls back to the models above when you hit a limit.
+   - Pick which one answers first in **Settings > Model > Preferred model**.
+   - **Offline:** [Ollama](https://ollama.com) with a local model.
 2. Say **"Hey Mike, what's the weather?"**
 
 <p align="center"><img src="docs/setup.jpg" width="560" alt="First-run setup: allow the microphone, then paste a free key"></p>

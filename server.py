@@ -122,6 +122,7 @@ SETTINGS_SPEC = {
     "memory_auto": ("MEMORY_AUTO", bool, False),
     "claude_memory": ("CLAUDE_MEMORY", bool, True),
     "brain_mode": ("BRAIN_MODE", str, False),
+    "preferred_provider": ("PREFERRED_PROVIDER", str, False),
 }
 MODEL_CHOICES = [
     {"id": "claude-haiku-5-5", "name": "Haiku 5.5", "desc": "Fastest. Great for everyday voice use."},
