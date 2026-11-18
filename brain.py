@@ -99,6 +99,11 @@ class Brain:
     async def start(self):
         if self.proc and self.proc.returncode is None:
             return
+        if not os.path.exists(config.CLAUDE_BIN):      # no Claude Code on this computer: the free models answer
+            if not getattr(self, "_told_missing", False):
+                log.info("Claude Code isn't installed; using free models only")
+                self._told_missing = True
+            return
         self._write_mcp_config()
         config.WORKDIR.mkdir(parents=True, exist_ok=True)
         # Drop every ANTHROPIC_*/CLAUDE* variable (API keys, proxy URLs, model overrides,

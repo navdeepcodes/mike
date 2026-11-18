@@ -34,8 +34,8 @@
         <div class="recent-list" id="recentList"></div>
       </div>
       <div class="side-foot">
-        <div class="usage" id="usage" title="Claude Pro usage in the current 5-hour window">
-          <div class="usage-row"><span>Claude Pro</span><span id="usageText">—</span></div>
+        <div class="usage" id="usage" title="Claude usage in the current 5-hour window">
+          <div class="usage-row"><span>Claude</span><span id="usageText">—</span></div>
           <div class="meter"><i id="usageBar"></i></div>
           <div class="usage-sub" id="resetText"></div>
         </div>
@@ -82,7 +82,7 @@
           <div class="hero" id="empty">
             <span class="mark big" aria-hidden="true"><i></i><i></i><i></i></span>
             <h1 id="greeting">Good evening</h1>
-            <p class="hero-sub">Say “Mike”, press <kbd>⌥</kbd><kbd>Space</kbd>, or type below.</p>
+            <p class="hero-sub">Say “Mike”<span class="mac-only">, press <kbd>⌥</kbd><kbd>Space</kbd>,</span> or type below.</p>
           </div>
         </div>
 
@@ -105,7 +105,7 @@
             <textarea id="input" rows="1" autocomplete="off" spellcheck="false" placeholder="Talk or type to Mike"></textarea>
             <div class="composer-row">
               <div class="composer-left">
-                <button type="button" class="chip-btn" id="talkBtn" title="Talk (⌥Space)">
+                <button type="button" class="chip-btn" id="talkBtn" title="Talk">
                   <span class="mark" aria-hidden="true"><i></i><i></i><i></i></span><span id="talkText">Talk</span>
                 </button>
               </div>
@@ -287,7 +287,7 @@
             <input class="field" id="setName" placeholder="Your name"></div>
           <div class="row"><div class="row-text"><b>Appearance</b></div>
             <div class="seg" id="setTheme"><button data-v="dark">Dark</button><button data-v="light">Light</button><button data-v="system">System</button></div></div>
-          <div class="row"><div class="row-text"><b>Open at login</b><span>Start Mike when you log in to your Mac.</span></div>
+          <div class="row"><div class="row-text"><b>Open at login</b><span>Start Mike when you log in to your <span class="os-name">Mac</span>.</span></div>
             <button class="switch" id="setLogin" role="switch"><i></i></button></div>
           <div class="row"><div class="row-text"><b>Show this window at launch</b><span>Otherwise Mike starts quietly as the desktop pet.</span></div>
             <button class="switch" id="setShowLaunch" role="switch"><i></i></button></div>
@@ -295,8 +295,8 @@
             <button class="switch" id="setChime" role="switch"><i></i></button></div>
           <div class="row col"><div class="row-text"><b>Keyboard shortcuts</b></div>
             <div class="keys">
-              <div><span>Talk to Mike, from any app</span><span><kbd>⌥</kbd><kbd>Space</kbd></span></div>
-              <div><span>Quit Mike, from any app</span><span><kbd>⌥</kbd><kbd>⇧</kbd><kbd>Q</kbd></span></div>
+              <div class="mac-only"><span>Talk to Mike, from any app</span><span><kbd>⌥</kbd><kbd>Space</kbd></span></div>
+              <div class="mac-only"><span>Quit Mike, from any app</span><span><kbd>⌥</kbd><kbd>⇧</kbd><kbd>Q</kbd></span></div>
               <div><span>Stop Mike</span><span><kbd>Esc</kbd></span></div>
               <div><span>New conversation</span><span><kbd>⌘</kbd><kbd>N</kbd></span></div>
               <div><span>Settings</span><span><kbd>⌘</kbd><kbd>,</kbd></span></div>
@@ -310,7 +310,7 @@
             <div class="seg" id="setEffort"><button data-v="low">Low</button><button data-v="medium">Medium</button><button data-v="high">High</button></div></div>
           <div class="row"><div class="row-text"><b>Start fresh after a break</b><span>Keeps replies fast. Memory carries over.</span></div>
             <select class="field select" id="setFresh"><option value="15">15 minutes</option><option value="30">30 minutes</option><option value="60">1 hour</option><option value="180">3 hours</option><option value="0">Never</option></select></div>
-          <div class="row"><div class="row-text"><b>Claude Pro usage</b><span id="setUsage">Shown after your first request</span></div>
+          <div class="row"><div class="row-text"><b>Claude usage</b><span id="setUsage">Shown after your first request</span></div>
             <button class="btn" id="setReset">New conversation</button></div>
           <h4 class="sub">Backup brain</h4>
           <p class="sec-note">When your Claude limit runs out or Claude can't be reached, Mike keeps going on free models: cloud first, then a model on your Mac if you're offline. He switches back to Claude by himself.</p>
@@ -325,7 +325,7 @@
             <div class="inline"><select class="field select" id="setVoice"></select><button class="btn" id="setVoicePreview">Preview</button></div></div>
           <div class="row"><div class="row-text"><b>Speaking speed</b><span id="setSpeedText">1.05×</span></div>
             <input type="range" class="range" id="setSpeed" min="0.8" max="1.4" step="0.05"></div>
-          <div class="row"><div class="row-text"><b>Listen for “Mike”</b><span>Off: start Mike with ⌥Space, the pet, or by typing.</span></div>
+          <div class="row"><div class="row-text"><b>Listen for “Mike”</b><span>Off: start Mike with the Talk button<span class="mac-only">, ⌥Space, the pet,</span> or by typing.</span></div>
             <button class="switch" id="setWake" role="switch"><i></i></button></div>
           <div class="row"><div class="row-text"><b>Talk over Mike</b><span>Start speaking while he talks and he stops to listen.</span></div>
             <button class="switch" id="setBarge" role="switch"><i></i></button></div>
@@ -366,7 +366,7 @@
 
         <section class="sec hidden" data-sec="privacy">
           <h3>Privacy &amp; permissions</h3>
-          <p class="sec-note">Speech is transcribed on your Mac. Only your requests go to Claude, on your Pro plan.</p>
+          <p class="sec-note">Hearing and speaking happen on this <span class="os-name">Mac</span>; audio never leaves it. Only your requests go to the model you chose.</p>
           <div class="perms" id="perms"></div>
           <div class="row"><div class="row-text"><b>Use the camera to notice you</b><span>Off: Mike notices you from keyboard and mouse activity and only turns the camera on when you ask him to look.</span></div>
             <button class="switch" id="setCamPresence" role="switch"><i></i></button></div>
@@ -379,12 +379,40 @@
             <span class="mark big" aria-hidden="true"><i></i><i></i><i></i></span>
             <div><b>Mike</b><span id="aboutVersion">Version 1.0</span></div>
           </div>
-          <div class="row"><div class="row-text"><b>Brain</b><span id="aboutBrain">Claude Code on your Claude Pro plan</span></div></div>
+          <div class="row"><div class="row-text"><b>Brain</b><span id="aboutBrain">Claude Code on your Claude plan</span></div></div>
           <div class="row"><div class="row-text"><b>Data folder</b><span id="aboutData">~/mike/data</span></div>
-            <button class="btn" id="aboutOpenData">Show in Finder</button></div>
-          <div class="row"><div class="row-text"><b>Quit Mike</b><span>Also stops listening. Shortcut: ⌥⇧Q.</span></div>
+            <button class="btn" id="aboutOpenData">Show folder</button></div>
+          <div class="row"><div class="row-text"><b>Quit Mike</b><span>Also stops listening.<span class="mac-only"> Shortcut: ⌥⇧Q.</span></span></div>
             <button class="btn danger" id="aboutQuit">Quit</button></div>
         </section>
+      </div>
+    </div>
+  </div>
+
+  <div class="overlay hidden" id="setup" role="dialog" aria-modal="true" aria-labelledby="setupTitle">
+    <div class="setup">
+      <div class="setup-head">
+        <span class="mark big" aria-hidden="true"><i></i><i></i><i></i></span>
+        <h2 id="setupTitle">Meet Mike</h2>
+        <p>Your voice assistant. Two quick steps and he's ready.</p>
+      </div>
+      <ol class="steps">
+        <li class="step" id="stepMic">
+          <span class="step-num" aria-hidden="true">1</span>
+          <div class="step-body"><b>Let Mike hear you</b>
+            <span id="setupMicText">He listens for his name. Speech becomes text on this computer; audio never leaves it.</span></div>
+          <button class="btn primary" id="setupMicBtn">Allow microphone</button>
+        </li>
+        <li class="step" id="stepBrain">
+          <span class="step-num" aria-hidden="true">2</span>
+          <div class="step-body"><b>Give him a brain</b>
+            <span id="setupBrainText">Paste a free key from any provider below. Each takes about a minute, no card needed; add two so he can switch when one is busy. Have Claude? Install Claude Code and Mike uses it automatically.</span>
+            <div class="perms" id="setupProviders"></div></div>
+        </li>
+      </ol>
+      <div class="setup-foot">
+        <button class="link-btn" id="setupSkip">Skip for now</button>
+        <button class="btn primary" id="setupDone" disabled>Start using Mike</button>
       </div>
     </div>
   </div>

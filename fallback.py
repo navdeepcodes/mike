@@ -45,6 +45,11 @@ PROVIDERS = [
      "only": ":free",
      "prefer": ["nvidia/nemotron-3-ultra", "google/gemma-4-31b", "nvidia/nemotron-3.5-super", "deepseek", "qwen/qwen3",
                 "openai/gpt-oss-120b", "google/gemma-4-26b", "baidu/ernie-5.5"]},
+    {"id": "opencode", "name": "OpenCode Zen", "base": "https://opencode.ai/zen/v1", "signup": "https://opencode.ai/auth",
+     # Only OpenCode's $0 models, never a paid one (exact ids; each is verified with a tool call before use).
+     "prefer": ["nemotron-3.5-super-vl-free", "deepseek-v4.1-flash-free", "longcat-2.5-free", "mimo-v2.6-flash-free",
+                "big-pickle", "hy4-flash-free", "flint-40b-free", "beam-free", "iceman-free", "inkling-2-small-free"],
+     "exact": True},
     {"id": "gemini", "name": "Google Gemini", "base": "https://generativelanguage.googleapis.com/v1beta/openai",
      "signup": "https://aistudio.google.com/apikey", "prefer": ["gemini-flash-latest"],
      # Google retires model names every few months: take the newest stable flash models it lists, verified below.
@@ -443,7 +448,7 @@ class FallbackBrain:
                 return None
             picks = []
             for want in p["prefer"]:
-                for i in ([i for i in ids if i == want] or [i for i in ids if want in i]):
+                for i in ([i for i in ids if i == want] or ([] if p.get("exact") else [i for i in ids if want in i])):
                     i = i.split("/", 1)[1] if i.startswith("models/") else i
                     if i not in picks:
                         picks.append(i)

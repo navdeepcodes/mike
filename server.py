@@ -1547,9 +1547,11 @@ async def ws_endpoint(ws: WebSocket):
         except Exception:
             pass
     mike.ws = ws
+    from fallback import load_keys
     await mike.send({"type": "hello", "name": config.NAME, "state": mike.state,
                      "usage": mike.usage, "voices": voice.voices(), "voice": voice.current_voice(),
-                     "pet": pet_settings()})
+                     "pet": pet_settings(), "platform": config.PLATFORM, "version": config.VERSION,
+                     "claude": os.path.exists(config.CLAUDE_BIN), "has_keys": bool(load_keys())})
     # A short, different hello on launch (skipped if Mike just restarted).
     if not mike.launched_hello and not greetings.recently_greeted(10):
         mike.say(greetings.hello())

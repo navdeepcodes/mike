@@ -11,6 +11,7 @@ IS_WIN = os.name == "nt"
 MACHINE = "Mac" if IS_MAC else "PC"
 SHELL = "zsh" if IS_MAC else "PowerShell" if IS_WIN else "bash"
 VENV_BIN = "Scripts" if IS_WIN else "bin"
+PLATFORM = "mac" if IS_MAC else "windows" if IS_WIN else "linux"
 
 
 def tf(fmt: str) -> str:
@@ -21,6 +22,7 @@ ROOT = Path(__file__).resolve().parent
 DATA = ROOT / "data"
 
 # ---- Identity -------------------------------------------------------------
+VERSION = "1.0.0"
 NAME = "Mike"
 # Things Whisper might hear when you say the name. Lowercase, no punctuation.
 WAKE_WORDS = ["mike", "mic", "mikey", "myke", "hey mike", "ok mike", "okay mike", "yo mike"]
@@ -43,7 +45,7 @@ def _newest_claude() -> str:
     return bundled[-1] if bundled else installed
 
 
-CLAUDE_BIN = _newest_claude()
+CLAUDE_BIN = os.environ.get("MIKE_CLAUDE_BIN") or _newest_claude()   # MIKE_CLAUDE_BIN=none: act as if not installed
 # Claude Code runs from a clean folder (so no project settings or proxy configs leak in)
 # and is given access to these folders.
 WORKDIR = ROOT / "workspace"

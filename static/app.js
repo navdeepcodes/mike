@@ -16,6 +16,16 @@ const pref = {
   set(k, v) { try { localStorage.setItem(`mike.${k}`, JSON.stringify(v)); } catch {} },
 };
 
+// Which OS the window runs on (Mike.app = Mac). Wording and shortcuts follow it.
+const OS = native ? "mac" : /Mac/i.test(navigator.platform) ? "mac" : /Win/i.test(navigator.platform) ? "windows" : "linux";
+function localize(os) {
+  document.body.dataset.os = os;
+  if (os === "mac") return;
+  const name = os === "windows" ? "PC" : "computer";
+  document.querySelectorAll(".os-name").forEach((n) => { n.textContent = name; });
+  document.querySelectorAll("kbd").forEach((k) => { if (k.textContent === "⌘") k.textContent = "Ctrl"; });
+  document.querySelectorAll("[title]").forEach((n) => { n.title = n.title.replace("⌘", "Ctrl+"); });
+}
 const S = {
   ws: null, state: "offline", connected: false,
   micOn: true, micOk: false, micPending: false, micError: "", micStream: null, micNode: null, workletLoaded: false,
@@ -196,7 +206,7 @@ function scrollDown(force = false) {
 }
 function resetThread() {
   el.thread.innerHTML = `<div class="hero" id="empty"><span class="mark big" aria-hidden="true"><i></i><i></i><i></i></span>
-    <h1 id="greeting"></h1><p class="hero-sub">Say “Mike”, press <kbd>⌥</kbd><kbd>Space</kbd>, or type below.</p></div>`;
+    <h1 id="greeting"></h1><p class="hero-sub">Say “Mike”<span class="mac-only">, press <kbd>⌥</kbd><kbd>Space</kbd>,</span> or type below.</p></div>`;
   S.turn = null;
   greet(); setEmpty(true);
 }
@@ -274,6 +284,11 @@ function handle(m) {
   if (["code_state", "term", "files", "diff", "file", "code_toast"].includes(m.type)) { Code.handle(m); return; }
   switch (m.type) {
     case "hello":
+      if (m.platform) localize(m.platform);
+      S.claude = !!m.claude;
+      el.usage.classList.toggle("hidden", !S.claude);
+      if (m.version) el.aboutVersion.textContent = `Version ${m.version}`;
+      if (!S.claude && !m.has_keys && !pref.get("setupDone", false)) openSetup();
       setState(m.state || "idle");
       if (m.usage) showUsage(m.usage);
       if (m.pet) showPet(m.pet.pet, m.pet.mode);
@@ -410,7 +425,8 @@ function showSettings(m) {
   if (m.voices) showVoices(m.voices, m.voice);
   if (m.pet) showPet(m.pet.pet, m.pet.mode);
   if (m.data_dir) { S.dataDir = m.data_dir; el.aboutData.textContent = m.data_dir.replace(/^\/Users\/[^/]+/, "~"); }
-  if (m.claude_bin) el.aboutBrain.textContent = `Claude Code on your Claude Pro plan${m.claude_bin.includes("Application Support/Claude") ? ", using the copy inside the Claude app" : ""}`;
+  if (m.claude_bin) el.aboutBrain.textContent = S.claude === false ? "Free models (add keys under Model)"
+    : `Claude Code on your Claude plan${m.claude_bin.includes("Application Support/Claude") ? ", using the copy inside the Claude app" : ""}`;
   S.userName = S.settings.user_name || "";
   el.meName.textContent = S.userName || "You"; el.avatar.textContent = initial();
   greet();
@@ -491,8 +507,14 @@ function showBackup(m) {
   el.backupState.textContent = ready.length
     ? `${blocked ? "In use now. " : ""}Ready: ${ready.map((p) => p.name).join(", ")}.`
     : "Add a free key below to turn it on.";
-  el.providers.innerHTML = "";
-  for (const p of m.providers || []) {
+  renderProviders(el.providers, m.providers || []);
+  if (!el.setup.classList.contains("hidden")) renderProviders(el.setupProviders, (m.providers || []).filter((p) => !p.local));
+  S.brainReady = S.claude || ready.length > 0;
+  refreshSetup();
+}
+function renderProviders(target, providers) {
+  target.innerHTML = "";
+  for (const p of providers) {
     const row = document.createElement("div"); row.className = "perm";
     const state = p.ready ? `Ready · ${p.model}` : p.local ? "Not running, or no model downloaded" : p.has_key ? "Key didn't work" : "No key yet";
     row.innerHTML = `<div class="p-text"><b></b><span></span></div>`;
@@ -507,14 +529,18 @@ function showBackup(m) {
       box.querySelector(".link-btn").onclick = () => openUrl(p.signup);
       row.append(box);
     }
-    el.providers.append(row);
+    target.append(row);
   }
 }
 
 // Native request/response: settings helpers that live in Mike.app.
 const nativeWaits = {};
 function nativeCall(op, args = {}) {
-  if (!native) return Promise.resolve(null);
+  if (!native) {
+    if (OS === "mac") return Promise.resolve(null);
+    return fetch("/api/native", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ op, args }) })
+      .then((r) => r.json()).catch(() => null);
+  }
   const id = "u" + Math.random().toString(36).slice(2, 9);
   return new Promise((res) => {
     nativeWaits[id] = res;
@@ -529,17 +555,31 @@ const PERMS = [
   { key: "screen", name: "Screen Recording", why: "See your screen when you ask what's on it.", icon: ICONS.screen },
   { key: "camera", name: "Camera", why: "Look through the camera when you ask him to.", icon: '<path d="M3.5 8.5a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-8a2 2 0 0 1-2-2zM15.5 11l5-3v8l-5-3"/>' },
 ];
+async function browserPerm(name) {
+  try { const r = await navigator.permissions.query({ name }); return r.state === "granted" ? "granted" : r.state === "denied" ? "denied" : "not_asked"; }
+  catch { return "not_asked"; }
+}
 async function refreshPerms() {
-  const st = (await nativeCall("perm_status")) || {};
+  const os = document.body.dataset.os || OS, mac = os === "mac";
+  const st = mac ? (await nativeCall("perm_status")) || {} : { microphone: await browserPerm("microphone"), camera: await browserPerm("camera") };
   el.perms.innerHTML = "";
-  for (const p of PERMS) {
+  if (!mac) {
+    const row = document.createElement("div"); row.className = "perm";
+    row.innerHTML = `<span class="p-ico"><svg viewBox="0 0 24 24">${ICONS.screen}</svg></span><div class="p-text"><b>Computer control</b>
+      <span>Clicking, typing and screenshots work without extra permissions on this ${os === "windows" ? "PC" : "computer"}.</span></div>
+      <span class="p-state ok">${svg("check")}Ready</span>`;
+    el.perms.append(row);
+  }
+  for (const p of PERMS.filter((x) => mac || x.key === "microphone" || x.key === "camera")) {
     const v = st[p.key], ok = v === "granted";
     const row = document.createElement("div"); row.className = "perm";
     row.innerHTML = `<span class="p-ico"><svg viewBox="0 0 24 24">${p.icon}</svg></span><div class="p-text"><b></b><span></span></div>
       <span class="p-state ${ok ? "ok" : v && v !== "not_asked" ? "bad" : ""}">${ok ? svg("check") + "Allowed" : v === "not_asked" ? "Not asked yet" : v ? "Not allowed" : "Mike app only"}</span>
-      <button class="btn">Open Settings</button>`;
+      <button class="btn">${mac ? "Open Settings" : ok ? "Allowed" : "Allow"}</button>`;
     row.querySelector("b").textContent = p.name; row.querySelector(".p-text span").textContent = p.why;
-    row.querySelector("button").onclick = () => nativeCall("open_pane", { pane: p.key });
+    row.querySelector("button").onclick = () => mac ? nativeCall("open_pane", { pane: p.key })
+      : (p.key === "microphone" ? retryMic().then(refreshPerms) : startCamera().catch(() => {}).then(refreshPerms));
+    if (!mac && ok) row.querySelector("button").disabled = true;
     el.perms.append(row);
   }
 }
@@ -918,9 +958,10 @@ document.addEventListener("click", (e) => {
 });
 document.addEventListener("keydown", (e) => {
   const typing = ["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName);
-  if (e.metaKey && e.key === ",") { e.preventDefault(); openSettings(); return; }
-  if (e.metaKey && e.key.toLowerCase() === "n") { e.preventDefault(); newConversation(); return; }
-  if (e.metaKey && e.key === "\\") { e.preventDefault(); setSide(el.app.classList.contains("collapsed")); return; }
+  const mod = e.metaKey || (OS !== "mac" && e.ctrlKey);
+  if (mod && e.key === ",") { e.preventDefault(); openSettings(); return; }
+  if (mod && e.key.toLowerCase() === "n") { e.preventDefault(); newConversation(); return; }
+  if (mod && e.key === "\\") { e.preventDefault(); setSide(el.app.classList.contains("collapsed")); return; }
   if (e.key === "Escape") {
     if (!el.settings.classList.contains("hidden")) { closeSettings(); return; }
     if (!el.modelMenu.classList.contains("hidden")) { el.modelMenu.classList.add("hidden"); return; }
@@ -976,6 +1017,11 @@ async function boot() {
     showReminders([{ id: "r1", text: "Revise chemistry notes", due: Date.now() / 1000 + 86400, kind: "reminder", repeat: "" }]);
     setState(params.get("state") || "idle");
     if (params.has("demo")) demo();
+    if (params.has("os")) localize(params.get("os"));
+    if (params.has("setup")) { el.setup.classList.remove("hidden"); S.claude = false;
+      showBackup({ providers: [{ id: "groq", name: "Groq", ready: params.get("setup") === "ready", model: "openai/gpt-oss-120b", has_key: params.get("setup") === "ready", key_hint: "••••8f2a", signup: "#" },
+        { id: "gemini", name: "Google Gemini", ready: false, has_key: false, signup: "#" }, { id: "openrouter", name: "OpenRouter", ready: false, has_key: false, signup: "#" },
+        { id: "nvidia", name: "NVIDIA", ready: false, has_key: false, signup: "#" }] }); refreshSetup(); }
     if (params.has("confirm")) handle({ type: "confirm", id: "x", summary: "delete the file notes.txt", detail: '{\n  "command": "rm ~/notes.txt"\n}' });
     if (params.has("view")) {
       showView(params.get("view"));
@@ -1001,15 +1047,44 @@ async function boot() {
   }
   renderStatus();
 }
+// ------------------------------------------------------------------ first-run setup
+let setupTimer = null;
+function openSetup() {
+  el.setup.classList.remove("hidden");
+  send({ type: "backup_get" });
+  refreshSetup();
+  clearInterval(setupTimer);
+  setupTimer = setInterval(refreshSetup, 700);
+}
+function closeSetup() {
+  pref.set("setupDone", true);
+  el.setup.classList.add("hidden");
+  clearInterval(setupTimer);
+}
+function refreshSetup() {
+  if (el.setup.classList.contains("hidden")) return;
+  const micOk = !!(S.micOk && S.micStream);
+  el.stepMic.classList.toggle("done", micOk);
+  el.setupMicText.textContent = micOk ? "Microphone on. Mike hears you."
+    : S.micError || "He listens for his name. Speech becomes text on this computer; audio never leaves it.";
+  el.stepBrain.classList.toggle("done", !!S.brainReady);
+  if (S.brainReady) el.setupBrainText.textContent = S.claude ? "Using Claude Code. Free keys are a backup for when you hit a limit." : "Ready. Add another key any time in Settings, under Model.";
+  el.setupDone.disabled = !(micOk && S.brainReady);
+}
+el.setupMicBtn.onclick = () => { ensureAudio().resume?.(); retryMic().then(refreshSetup); };
+el.setupDone.onclick = () => { closeSetup(); ensureAudio().resume?.(); };
+el.setupSkip.onclick = closeSetup;
+
 function demo() {
   handle({ type: "transcript" }); handle({ type: "user", text: "Mike, what's on my screen?" });
   handle({ type: "tool", name: "screenshot", detail: "" });
-  handle({ type: "assistant_delta", text: "You've got the CanSat telemetry site open in Opera, with the altitude graph climbing to about 420 metres and the battery at 7.9 volts. Looks like a clean test run." });
+  handle({ type: "assistant_delta", text: "You've got your project dashboard open in the browser. Three tasks are due this week, and the build from this morning passed." });
   handle({ type: "assistant_done", duration_ms: 2400 });
   handle({ type: "user", text: "Nice. Put on something to focus to on Spotify." });
   handle({ type: "tool", name: "ui", detail: "" }); handle({ type: "tool", name: "press", detail: "" });
   handle({ type: "assistant_delta", text: "Done, your lofi chill playlist is on." });
   handle({ type: "assistant_done", duration_ms: 4800 });
 }
+localize(OS);
 setState("offline");
 boot();

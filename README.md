@@ -8,6 +8,8 @@ Free models out of the box; your Claude plan if you have one.</p>
 
 <p align="center">macOS · Windows · Linux (beta)</p>
 
+<p align="center"><img src="docs/chat.jpg" width="720" alt="Mike's window: a conversation where he reads the screen and starts a playlist"></p>
+
 ---
 
 ## Install
@@ -32,21 +34,24 @@ Nothing is installed system-wide.
 
 Then:
 
-1. Open **Mike** (Applications on a Mac, Start menu on Windows) and allow the microphone.
-2. Give him a brain, either:
+1. Open **Mike** (Applications on a Mac, Start menu on Windows). A short setup asks for the microphone and a brain:
    - **Free:** Settings > Model > add a free key from [Groq](https://console.groq.com/keys),
-     [Gemini](https://aistudio.google.com/apikey), [OpenRouter](https://openrouter.ai/keys) or
-     [NVIDIA](https://build.nvidia.com). Add two or three: Mike switches between them when one is busy.
+     [Gemini](https://aistudio.google.com/apikey), [OpenRouter](https://openrouter.ai/keys),
+     [OpenCode Zen](https://opencode.ai/auth) or [NVIDIA](https://build.nvidia.com). Add two or three: Mike
+     switches between them when one is busy, and only ever uses their free models.
      [Ollama](https://ollama.com) works too, fully offline.
    - **Claude:** install [Claude Code](https://docs.claude.com/en/docs/claude-code) and log in. Mike uses
      your plan and falls back to the free models when you hit a limit.
-3. Say **"Hey Mike, what's the weather?"**
+2. Say **"Hey Mike, what's the weather?"**
+
+<p align="center"><img src="docs/setup.jpg" width="560" alt="First-run setup: allow the microphone, then paste a free key"></p>
 
 ## What he can do
 
 | | |
 |---|---|
 | **Talk** | Wake word ("Mike"), follow-ups without the name, talk over him to interrupt, natural neural voice |
+| **His own browser** | A Chromium window he drives himself: researches, fills forms, compares prices, checks orders. You can watch and take over |
 | **Run your computer** | Open apps and sites, play/pause/skip music, volume, click, type, shortcuts, screenshots |
 | **Remember** | Long-term memory of what you tell him; "what did I say about…" searches past conversations |
 | **Time** | Reminders, timers, alarms, repeating ones ("every weekday at 8"), spoken when due |
@@ -70,7 +75,8 @@ Then:
   Audio is never uploaded.
 - What you *ask* goes to the model you chose (a free provider, Claude, or Ollama locally).
 - Keys, memory and settings stay in `data/` inside Mike's folder, which git ignores.
-- Anything risky (deleting files, sending messages, sudo, pushing code) asks you first.
+- Anything risky (deleting files, sending messages, buying, posting, sudo, pushing code) asks you first.
+- Mike never types passwords, card numbers or one-time codes; his browser asks you to type those yourself.
 
 ## Settings
 
@@ -103,6 +109,11 @@ speaker ◄── voice.py (Kokoro) ◄─────┘   tools: mike_tools.py
   lock icon in the window on Windows), and that the right input is selected.
 - **"I don't have a brain set up yet":** add a free key in Settings > Model.
 - **Logs:** `data/server.log`.
+
+## Uninstall
+
+Run `uninstall.ps1` (Windows: Start menu > Uninstall Mike) or `./uninstall.sh` (Mac/Linux) in Mike's folder.
+Your memory, keys and settings stay in `data/` unless you set `MIKE_REMOVE_DATA=1`.
 
 ## Contributing
 

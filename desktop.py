@@ -132,7 +132,8 @@ def handle(op: str, a: dict) -> dict:
             return {"enabled": False}
         if op == "app_info":
             import platform
-            return {"version": "1.0", "build": "1", "os": platform.platform()}
+            import config
+            return {"version": config.VERSION, "build": "1", "os": platform.platform()}
         if op == "open_url":
             url = str(a.get("url", ""))
             if not url.startswith(("http://", "https://")):

@@ -120,6 +120,11 @@ if (-not $NoShortcuts) {
         $s.Description = "Mike, your voice assistant"
         $s.Save()
     }
+    $u = $shell.CreateShortcut((Join-Path ([Environment]::GetFolderPath("Programs")) "Uninstall Mike.lnk"))
+    $u.TargetPath = "powershell.exe"
+    $u.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$(Join-Path $Dir 'uninstall.ps1')`""
+    $u.WorkingDirectory = $Dir
+    $u.Save()
     if ($Autostart) {
         $s = $shell.CreateShortcut((Join-Path ([Environment]::GetFolderPath("Startup")) "Mike.lnk"))
         $s.TargetPath = $pyw
