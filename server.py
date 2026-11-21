@@ -197,6 +197,7 @@ class Mike:
         self.brain = Brain(self.on_delta, self.on_tool, self.on_done, self.on_permission,
                            self.on_log, self.on_usage)
         self.ears = Ears(self.on_heard, self.on_level)
+        self.ears.on_wake_hint = self.wake_hint
         self.voice_id = voiceprint.VoicePrint()
         # Backup brain (free cloud models, then local) for when Claude is unavailable.
         self.launched_hello = False
@@ -246,6 +247,19 @@ class Mike:
                 await pw.send_text(data)
             except Exception:
                 self.pets.discard(pw)
+
+    async def wake_hint(self, on: bool):
+        """The quick pass heard the name: show the pet listening now instead of after the accurate pass.
+        Only the pet is told; Mike's own state changes once the accurate pass confirms (or the pet goes back)."""
+        if self.state != "idle":
+            return
+        await self.send({"type": "state", "state": "listening" if on else "idle"})
+        if on:
+            async def settle():
+                await asyncio.sleep(6)
+                if self.state == "idle":             # nothing came of it: don't leave the pet hanging
+                    await self.send({"type": "state", "state": "idle"})
+            asyncio.create_task(settle())
 
     async def set_state(self, state: str):
         if state != self.state:

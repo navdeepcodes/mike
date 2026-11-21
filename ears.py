@@ -96,6 +96,10 @@ class Ears:
         # Set by the server: quick yes/no on a clip (is it plausibly your voice?). Noise and other
         # people are dropped before the slow speech model, so your real words are never stuck behind them.
         self.prefilter: Callable[[bytes], bool] | None = None
+        # Set by the server: called with True the moment the quick pass hears the name (so the pet can
+        # pop up ~1-2 s before the accurate pass finishes), and False if the accurate pass disagrees.
+        self.on_wake_hint: Callable[[bool], Awaitable[None]] | None = None
+        self._hinted = False
         # Loudness learning: talk that isn't for Mike (TV, people in the room) vs. how loud you
         # are when you say the name. Follow-ups quieter than that are treated as background.
         self.bg_levels: list[float] = []
@@ -146,6 +150,7 @@ class Ears:
     async def run(self):
         """Transcribe utterances one at a time, in order."""
         loop = asyncio.get_running_loop()
+        self.loop = loop
         while True:
             pcm, attentive = await self.queue.get()
             # Stay real-time: if background clips have piled up, skip stale ones (never ones
@@ -173,6 +178,10 @@ class Ears:
                 log.exception("transcription failed")
                 continue
             log.info("timing: transcribed %.1fs of speech in %.2fs", len(pcm) / (RATE * 2), time.time() - t0)
+            if self._hinted:
+                self._hinted = False
+                if not (text and self.wake_re.search(text)) and self.on_wake_hint:
+                    await self.on_wake_hint(False)      # the accurate pass says it wasn't the name: pet back down
             if text and text.lower().strip(" .,!?") not in HALLUCINATIONS:
                 if self.wake_re.search(text):
                     self.wake_level = self.last_db if self.wake_level is None else 0.7 * self.wake_level + 0.3 * self.last_db
@@ -189,6 +198,7 @@ class Ears:
 
     def _transcribe(self, pcm: bytes, attentive: bool = True) -> str:
         qtext = ""
+        quick = None
         self.alt = ""          # a second opinion when the two models disagree (the brain gets to weigh it)
         fast_text = ""
         audio = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
@@ -217,6 +227,10 @@ class Ears:
                 log.info("ignored (no name, %.2fs, %.0f dB): %r", time.time() - t, loudness_db(pcm), qtext[:80])
                 self.bg_levels = (self.bg_levels + [loudness_db(pcm)])[-40:]
                 return ""
+            if self.on_wake_hint and self.wake_re.search(qtext) and getattr(self, "loop", None):
+                self._hinted = True
+                asyncio.run_coroutine_threadsafe(self.on_wake_hint(True), self.loop)
+                log.info("timing: name heard by quick pass in %.2fs, pet shown", time.time() - t)
         if self.mlx:
             res = None
             thr = getattr(config, "FAST_ACCEPT_LOGPROB", None)
@@ -224,7 +238,8 @@ class Ears:
                 # The small model takes ~0.15 s, the big one ~1.2 s (it always encodes 30 s of audio).
                 # With the name prompt the small one is nearly as accurate, and it knows when it's
                 # unsure (measured: when this confident, 3.9% word errors vs 4.4% for the big one).
-                fast = self.mlx.transcribe(
+                # The screening pass above is the same model on the same audio: reuse it (saves ~0.15 s).
+                fast = quick if quick is not None else self.mlx.transcribe(
                     audio, path_or_hf_repo=self.screen_model, language="en", temperature=0.0,
                     condition_on_previous_text=False, no_speech_threshold=0.5, initial_prompt=ADDRESS_HINT)
                 segs = fast.get("segments", [])
@@ -254,6 +269,12 @@ class Ears:
             if dropped:
                 log.info("dropped low-confidence speech: %r", " / ".join(dict.fromkeys(dropped))[:160])
             text = _dedupe(" ".join(kept).strip())
+            letters = [c for c in text if c.isalpha()]
+            if letters and sum(not c.isascii() for c in letters) / len(letters) > 0.08:
+                # Turbo sometimes "hears" unclear audio as another language (Icelandic, Welsh...) even with
+                # language="en": that's never you talking to Mike, so don't act on it.
+                log.info("dropped non-English transcription: %r", text[:80])
+                text = ""
             if fast_text and res is not fast and text and difflib.SequenceMatcher(None, fast_text.lower(), text.lower()).ratio() < 0.85:
                 self.alt = fast_text
             # A lone "Mike" is so short the big model sometimes returns nothing for it.
