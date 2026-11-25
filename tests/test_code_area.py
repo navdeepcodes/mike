@@ -252,3 +252,24 @@ def test_only_mikes_own_page_can_drive_him():
     assert not ok("http://127.0.0.1:9999", "127.0.0.1:8777", 8777)           # another local app's page
     assert not ok(None, "evil.example:8777", 8777)                           # DNS rebinding
     assert ok(None, "192.168.1.5:8777", 8777, bind_host="0.0.0.0")           # opened up on purpose: host not checked
+
+
+def test_a_coding_turn_cannot_finish_without_checking_its_work(fake, tmp_path):
+    brain, world, ev = fake
+    f = tmp_path / "app.py"
+    world["script"] = [("tool", ("write_file", {"path": str(f), "content": "print(1)\n"})), ("text", "Done, it works."),
+                       ("tool", ("run_command", {"command": f"python3 {f}"}, "c2")), ("text", "Ran it: prints 1.")]
+    run(brain, "make app.py print 1")
+    assert "prints 1" in ev["text"]
+    nudges = [m for b in world["seen"] for m in b["messages"] if m["role"] == "user" and "Before you finish" in str(m["content"])]
+    assert nudges and "haven't run anything" in nudges[0]["content"]
+
+
+def test_a_failing_last_command_sends_him_back_but_only_twice(fake, tmp_path):
+    brain, world, ev = fake
+    f = tmp_path / "bad.py"
+    world["script"] = [("tool", ("write_file", {"path": str(f), "content": "raise SystemExit(3)\n"})),
+                       ("tool", ("run_command", {"command": f"python3 {f}"}, "c2")),
+                       ("text", "All good."), ("text", "All good."), ("text", "It still exits with code 3.")]
+    run(brain, "make bad.py work")
+    assert ev["done"].get("error") is None and "still exits" in ev["text"]

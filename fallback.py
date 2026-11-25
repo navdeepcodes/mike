@@ -1103,6 +1103,16 @@ class FallbackBrain:
                     continue
                 if not (said + text).strip():
                     raise _ProviderDown("model returned an empty reply after the recovery nudge")
+                check = self._unverified() if dev else ""
+                tries = sum(1 for n in nudged if n.startswith("verify"))
+                if check and tries < 2:
+                    # About to say "done" without having seen it work: send him back to check (the benchmark
+                    # caught free models claiming success over failing tests in 5 tasks out of 5).
+                    nudged.add(f"verify{tries}")
+                    log.info("coding turn ending unverified; sending it back (%d)", tries + 1)
+                    self.history += [{"role": "assistant", "content": text, "nudge": True},
+                                     {"role": "user", "content": check, "nudge": True}]
+                    continue
                 said += text
                 self.history.append({"role": "assistant", "content": text})
                 return said
@@ -1139,6 +1149,29 @@ class FallbackBrain:
                 log.info("%s failed %d steps in a row; moving the task to a more capable model", lane, streak)
                 raise _Escalate(lane)
         return said
+
+    def _unverified(self) -> str:
+        """In this request: files changed but nothing run since, or the last command failed? (Else "".)"""
+        start = max((i for i, m in enumerate(self.history) if m["role"] == "user" and not m.get("nudge")), default=0)
+        names, changed, ran, ran_ok = {}, -1, -1, True
+        for i, m in enumerate(self.history[start:]):
+            for c in m.get("tool_calls") or []:
+                names[c.get("id")] = c.get("function", {}).get("name", "")
+            if m["role"] == "tool":
+                name = names.get(m.get("tool_call_id"), "")
+                if name in ("write_file", "edit_file", "code_write", "code_edit"):
+                    changed = i
+                elif name in ("run_command", "code_bash", "code_test", "terminal_read"):
+                    ran, ran_ok = i, model_stats.step_ok(m.get("content") or "")
+        if changed < 0:
+            return ""
+        if ran < changed:
+            return ("(Before you finish: you changed files but haven't run anything since. Run the tests or the program "
+                    "now and read the output. Then reply.)")
+        if not ran_ok:
+            return ("(Before you finish: the last command you ran failed. Fix the cause and run it again. If you truly "
+                    "can't, say plainly what still fails instead of saying it's done.)")
+        return ""
 
     def _drop_images(self):
         last = next((m for m in reversed(self.history) if m["role"] == "user" and not m.get("nudge")), None)
