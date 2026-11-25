@@ -115,6 +115,11 @@ def fake(tmp_path, monkeypatch):
         kind, val = step[0], step[1]
         if kind == "raise":
             raise val
+        if kind == "partial":                               # some words arrive, then the connection drops
+            async def body():
+                yield b"data: " + json.dumps({"choices": [{"delta": {"content": val}}]}).encode() + b"\n\n"
+                raise httpx.ReadTimeout("dropped mid-reply")
+            return httpx.Response(200, content=body(), headers={"content-type": "text/event-stream"})
         if kind == "status":
             return httpx.Response(val, text=step[2])
         if kind == "for":                                   # answer depends on the model asked
@@ -280,6 +285,24 @@ def test_a_dropped_connection_mid_task_hands_the_task_to_another_model(fake, tmp
     f = tmp_path / "n.txt"; f.write_text("42")
     world["script"] = [("tool", ("read_file", {"path": str(f)})), ("raise", httpx.ReadTimeout("dropped")),
                        ("text", "The file says 42.")]
+    brain.dev_until = 0                                    # even before coding mode is on: a task with steps continues
     run(brain, "what number is in n.txt")
     assert ev["done"].get("error") is None and "42" in ev["text"]
     assert world["seen"][-1]["model"] == "m2" and "fake/m1" in brain.failed_until
+
+
+def test_a_connection_dropped_mid_sentence_during_a_task_still_finishes(fake, tmp_path):
+    brain, world, ev = fake
+    brain.dev_until = 0
+    f = tmp_path / "n.txt"; f.write_text("7")
+    world["script"] = [("tool", ("read_file", {"path": str(f)})), ("partial", "The number i"), ("text", "The number is 7.")]
+    run(brain, "what number is in n.txt")
+    assert ev["done"].get("error") is None and "is 7" in ev["text"]
+
+
+def test_a_plain_answer_cut_off_is_not_said_twice(fake):
+    brain, world, ev = fake
+    brain.dev_until = 0
+    world["script"] = [("partial", "Paris is the cap"), ("text", "Paris is the capital of France.")]
+    run(brain, "what is the capital of france")
+    assert "connection dropped" in (ev["done"].get("error") or "")
