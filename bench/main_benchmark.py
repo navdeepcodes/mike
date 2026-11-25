@@ -182,6 +182,19 @@ def import_test_module(module_path: str):
     return __import__(module_path, fromlist=["*"])
 
 
+def prepare_task(task_name: str, task_dir: Path):
+    """Per-task touches after the fixture is written (kept the same as the Nov 2026 run)."""
+    if task_name == "task2_debug_module":
+        # As in the Nov 2026 run: drop the fixture's "# BUG: should be ..." comments (they give the answers away)
+        # and put the visible failing tests (test_module.py) next to the code, as the task text says.
+        for f in task_dir.glob("*.py"):
+            src = re.sub(r"[ \t]*#\s*BUG:.*", "", f.read_text())
+            f.write_text(re.sub(r"\s*BUG:[^\"\n]*", "", src))
+        visible = (Path(__file__).parent / "test_task2_debug.py").read_text()
+        visible = re.sub(r"task_dir = Path\(os\.environ.*\n.*\n", "task_dir = Path(__file__).parent\n", visible)
+        (task_dir / "test_module.py").write_text(visible)
+
+
 async def run_mike_task(task_text: str, task_name: str, run_id: str, base_dir: Path) -> BenchmarkResult:
     """Run a single Mike task in a fresh temp directory."""
     task_dir = base_dir / f"{task_name}_{run_id}"
@@ -189,6 +202,7 @@ async def run_mike_task(task_text: str, task_name: str, run_id: str, base_dir: P
     # Run setup first
     setup_func = import_setup_function(SETUP_FUNCTIONS[task_name])
     setup_func(task_dir)
+    prepare_task(task_name, task_dir)
     # Each run gets its own venv on PATH, as the task text says (it also sees Mike's packages, read-only).
     from self_coding import DevSession, ToolExecutor
     ToolExecutor(task_dir, DevSession("bench", "setup", task_dir))._project_venv_bin()
@@ -258,7 +272,10 @@ async def run_all_mike_tasks(base_dir: Path) -> List[BenchmarkResult]:
     """Run all 5 tasks twice each (use better result)."""
     all_results = []
 
+    only = [t for t in os.environ.get("MIKE_BENCH_TASKS", "").split(",") if t]
     for task_name, task_text in TASKS.items():
+        if only and task_name not in only:
+            continue
         print(f"\n{'='*60}")
         print(f"Running {task_name} for Mike...")
         print(f"{'='*60}")
