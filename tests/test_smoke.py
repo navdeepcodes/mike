@@ -105,6 +105,10 @@ def test_provider_helpers(monkeypatch):
     assert fallback._base(cf, "acc123:tok") == "https://api.cloudflare.com/client/v4/accounts/acc123/ai/v1"
     assert fallback._auth(cf, "acc123:tok") == {"Authorization": "Bearer tok"}
     assert fallback._body(oa, {"max_tokens": 5, "temperature": 0.4, "model": "m"}) == {"max_completion_tokens": 5, "model": "m"}
+    # Workers AI 400s on content: null (a tools-only assistant turn); it must go out as ""
+    turn = {"role": "assistant", "content": None, "tool_calls": [{"id": "c1"}]}
+    sent = fallback._body(cf, {"messages": [{"role": "user", "content": "hi"}, turn]})
+    assert sent["messages"][1]["content"] == "" and sent["messages"][0]["content"] == "hi" and turn["content"] is None
     lanes = [(oa, "a"), (cf, "b")]
     monkeypatch.setattr(config, "PREFERRED_PROVIDER", "cloudflare")
     assert fallback.preferred_first(lanes)[0][0]["id"] == "cloudflare"
@@ -119,3 +123,15 @@ def test_cloudflare_paste_needs_a_token():
     import fallback
     key, problem = asyncio.run(fallback.cloudflare_key("hello there"))
     assert key == "" and "token" in problem
+
+
+def test_file_tools_and_commands_stay_out_of_mikes_folder(tmp_path, monkeypatch):
+    """A model's relative paths and bare `pip install` once rewrote Mike's requirements.txt and broke his venv."""
+    import fallback, projects
+    monkeypatch.setattr(projects, "current", lambda: tmp_path)
+    fallback.write_file("made.txt", "hi")
+    assert (tmp_path / "made.txt").read_text() == "hi" and not (config.ROOT / "made.txt").exists()
+    assert fallback.read_file("made.txt") == "hi"
+    mine = str(config.ROOT / ".venv" / config.VENV_BIN)
+    for where in ("", str(tmp_path)):           # home (no folder given) and a project: never Mike's venv
+        assert mine not in fallback.run_command("echo $PATH" if not config.IS_WIN else "$env:PATH", where)
