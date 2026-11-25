@@ -131,6 +131,16 @@ class ProjectDetector:
             return "swift"
         return "unknown"
 
+    def _pytest_available(self) -> bool:
+        """pytest on PATH, in the project's own venv, or among Mike's packages (which a project venv Mike made
+        can import). Only checking PATH picked unittest on machines where pytest lives in Mike's venv alone."""
+        import importlib.util
+        if shutil.which("pytest"):
+            return True
+        if any((self.project_path / v / config.VENV_BIN / "pytest").exists() for v in (".venv", "venv", "env")):
+            return True
+        return importlib.util.find_spec("pytest") is not None
+
     def _detect_test_framework(self) -> str:
         """Detect test framework."""
         lang = self._detect_language()
@@ -138,8 +148,7 @@ class ProjectDetector:
             # pytest is a superset for ordinary unittest tests and also discovers
             # function-style test_* tests, which unittest discovery silently skips.
             has_test_files = bool(list(self.project_path.glob("test_*.py")) or list(self.project_path.glob("*_test.py")))
-            project_pytest = self.project_path / ".venv" / "bin" / "pytest"
-            if has_test_files and (shutil.which("pytest") or project_pytest.exists()):
+            if has_test_files and self._pytest_available():
                 return "pytest"
             if (self.project_path / "pytest.ini").exists() or (self.project_path / "pyproject.toml").exists():
                 content = (self.project_path / "pyproject.toml").read_text() if (self.project_path / "pyproject.toml").exists() else ""
