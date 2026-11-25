@@ -1066,9 +1066,12 @@ class FallbackBrain:
             except _Skip:
                 pass
             except (httpx.ConnectError, httpx.ReadTimeout, httpx.ConnectTimeout, httpx.RemoteProtocolError) as e:
-                if said or text:
+                # Earlier rounds (their text and every tool step) are already in the history, so another model can
+                # pick the task up from here; only this round's unfinished words are lost. (This used to end the
+                # whole task whenever anything had been said before the connection dropped.)
+                if text and not dev:
                     raise RuntimeError(f"connection dropped mid-reply ({type(e).__name__})")
-                raise _ProviderDown(type(e).__name__)
+                raise _ProviderDown(f"{type(e).__name__} (connection dropped)")
             if not head["done"] and head["buf"].strip():
                 head["done"] = True
                 await emit("")

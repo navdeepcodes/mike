@@ -273,3 +273,13 @@ def test_a_failing_last_command_sends_him_back_but_only_twice(fake, tmp_path):
                        ("text", "All good."), ("text", "All good."), ("text", "It still exits with code 3.")]
     run(brain, "make bad.py work")
     assert ev["done"].get("error") is None and "still exits" in ev["text"]
+
+
+def test_a_dropped_connection_mid_task_hands_the_task_to_another_model(fake, tmp_path):
+    brain, world, ev = fake
+    f = tmp_path / "n.txt"; f.write_text("42")
+    world["script"] = [("tool", ("read_file", {"path": str(f)})), ("raise", httpx.ReadTimeout("dropped")),
+                       ("text", "The file says 42.")]
+    run(brain, "what number is in n.txt")
+    assert ev["done"].get("error") is None and "42" in ev["text"]
+    assert world["seen"][-1]["model"] == "m2" and "fake/m1" in brain.failed_until
