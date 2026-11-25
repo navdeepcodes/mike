@@ -1,3 +1,4 @@
+import json
 import pytest
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
@@ -40,7 +41,7 @@ def test_autonomous_loop_executes_model_driver_and_requires_passing_tests(tmp_pa
         tmp_path, record_delta, record_tool, noop_done, allow_permission, model_driver=drive
     ).run("Fix the broken program", max_steps=10, task_dir=str(tmp_path / "task-state")))
 
-    assert result["blocked"] is False
+    assert result["blocked"] is False, json.dumps(result, default=str)[:3000]
     assert result["changes"] == 1
     assert result["verification"]["tests"]["status"] == "passed"
     assert result["task_persistence"]["status"] == "completed"
@@ -106,7 +107,7 @@ def test_autonomous_loop_resumes_saved_progress_after_interruption(tmp_path):
 
     assert first["task_persistence"]["status"] == "blocked"
     assert "Saved progress from the previous run" in resumed_prompts[0]
-    assert second["blocked"] is False
+    assert second["blocked"] is False, json.dumps(second, default=str)[:3000]
     assert second["verification"]["tests"]["status"] == "passed"
     assert second["task_persistence"]["status"] == "completed"
 
