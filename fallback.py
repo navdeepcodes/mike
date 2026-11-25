@@ -138,6 +138,9 @@ def _body(p: dict, body: dict) -> dict:
         body = {k: v for k, v in body.items() if k != "temperature"}
         if "max_tokens" in body:
             body["max_completion_tokens"] = body.pop("max_tokens")
+    if p["id"] == "cloudflare" and body.get("messages"):
+        # Workers AI rejects content: null (an assistant turn that only calls tools) with HTTP 400; "" is accepted.
+        body = {**body, "messages": [{**m, "content": ""} if m.get("content") is None else m for m in body["messages"]]}
     return body
 
 
@@ -223,14 +226,13 @@ def run_command(command: str, cwd: str = "") -> str:
     Anything long-running (a server, a watcher) belongs in terminal_start instead."""
     try:
         where = os.path.expanduser(cwd) if cwd and os.path.isdir(os.path.expanduser(cwd)) else str(config.HOME)
-        env = _ENV
-        if where != str(config.HOME):
-            # A project runs with its own Python, not Mike's (whose packages are Mike's, not the project's).
-            mine = str(config.ROOT / ".venv" / config.VENV_BIN)
-            theirs = os.path.join(where, ".venv", config.VENV_BIN)
-            inside_mike = os.path.realpath(where).startswith(str(config.ROOT))
-            parts = [q for q in _ENV["PATH"].split(os.pathsep) if q != mine]
-            env = dict(_ENV, PATH=os.pathsep.join(([theirs] if os.path.isdir(theirs) else []) + ([mine] if inside_mike else []) + parts))
+        # Mike's venv is on PATH only inside Mike's own folder: elsewhere (home included) a bare `pip install`
+        # would install into Mike and once broke him. A project runs with its own .venv when it has one.
+        mine = str(config.ROOT / ".venv" / config.VENV_BIN)
+        theirs = os.path.join(where, ".venv", config.VENV_BIN)
+        inside_mike = os.path.realpath(where).startswith(os.path.realpath(config.ROOT))
+        parts = [q for q in _ENV["PATH"].split(os.pathsep) if q != mine]
+        env = dict(_ENV, PATH=os.pathsep.join(([theirs] if os.path.isdir(theirs) else []) + ([mine] if inside_mike else []) + parts))
         # Not a login shell: profile scripts print their own noise, which models read as "it failed".
         r = subprocess.run(_shell(command), capture_output=True, text=True, timeout=120,
                            cwd=where, env=env, encoding="utf-8", errors="replace",
@@ -245,11 +247,24 @@ def run_command(command: str, cwd: str = "") -> str:
     return f"Failed (exit code {r.returncode}): {(err or out)[:3000]}"
 
 
+def _abs(path: str) -> str:
+    """Relative paths mean the current project (or home), never Mike's own folder (the process's directory)."""
+    p = os.path.expanduser(path)
+    if os.path.isabs(p):
+        return p
+    try:
+        import projects
+        base = projects.current() or config.HOME
+    except Exception:
+        base = config.HOME
+    return os.path.join(str(base), p)
+
+
 def write_file(path: str, content: str) -> str:
     """Create or overwrite a text file with the content (makes folders as needed). Use this for code, HTML, CSS
     and documents instead of shell heredocs."""
     try:
-        p = os.path.expanduser(path)
+        p = _abs(path)
         os.makedirs(os.path.dirname(p) or ".", exist_ok=True)
         with open(p, "w") as fh:
             fh.write(content)
@@ -262,7 +277,7 @@ def read_file(path: str, start: int = 0, end: int = 0) -> str:
     """Read a text file (first 20,000 characters). Give start and end line numbers to read just that part, shown
     with line numbers (the numbers are not part of the file: never copy them into edit_file)."""
     try:
-        with open(os.path.expanduser(path), errors="replace") as f:
+        with open(_abs(path), errors="replace") as f:
             text = f.read()
     except Exception as e:
         return f"Couldn't read it: {e}"
@@ -293,7 +308,7 @@ def _syntax_problem(path: str) -> str:
 def edit_file(path: str, old: str, new: str, replace_all: bool = False) -> str:
     """Change part of an existing file: replace the exact text old with new. First read_file it and copy old exactly
     (same indentation, no line numbers), enough lines to be unique. Prefer this to rewriting a whole file."""
-    p = os.path.expanduser(path)
+    p = _abs(path)
     try:
         text = open(p, errors="replace").read()
     except Exception as e:
