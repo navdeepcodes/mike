@@ -54,6 +54,7 @@ MODEL = None                # None = Claude Code's default for your plan. Or "so
 EFFORT = "low"              # snappy replies; set None for deeper thinking
 # Built-in Claude Code tools Mike gets. Fewer tools = shorter prompt = faster first word.
 TOOLS = ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "WebSearch", "WebFetch"]
+CODE_APPROVAL = "ask"      # Code tab: "ask" before every edit and command (like Claude Code), or "risky" (only risky ones)
 AUTOPILOT = True           # keep working on a task by himself until it's really finished
 AUTOPILOT_MAX_ROUNDS = 60  # safety limits so a stuck task can't run away with your usage
 AUTOPILOT_MAX_MIN = 20

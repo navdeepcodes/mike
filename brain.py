@@ -36,6 +36,8 @@ class Brain:
         self.on_tool = on_tool
         self.on_done = on_done
         self.on_permission = on_permission
+        self.on_tool_result = None             # set by the server: each step's output, for the Code tab
+        self.current_tool_id = ""
         self.on_log = on_log
         self.proc: Optional[asyncio.subprocess.Process] = None
         self.session_id: Optional[str] = self._load_session()
@@ -245,7 +247,16 @@ class Brain:
         elif t == "assistant":
             for block in msg.get("message", {}).get("content", []):
                 if block.get("type") == "tool_use":
+                    self.current_tool_id = block.get("id", "")
                     await self.on_tool(block.get("name", "?"), block.get("input") or {})
+        elif t == "user" and self.on_tool_result and not self.ignore_output:
+            # Claude Code reports each tool's output back as a user turn of tool_result blocks.
+            for block in msg.get("message", {}).get("content", []) or []:
+                if isinstance(block, dict) and block.get("type") == "tool_result":
+                    body = block.get("content")
+                    if isinstance(body, list):
+                        body = "\n".join(str(b.get("text", "")) for b in body if isinstance(b, dict) and b.get("type") == "text")
+                    await self.on_tool_result(block.get("tool_use_id", ""), "", str(body or ""), bool(block.get("is_error")))
         elif t == "rate_limit_event":
             info = msg.get("rate_limit_info") or {}
             await self.on_usage(info)

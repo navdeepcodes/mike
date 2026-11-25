@@ -240,21 +240,33 @@ def changes(path: str = "") -> list[dict]:
     return sorted(out, key=lambda c: c["file"])
 
 
+def _inside(p: Path, file: str) -> Path | None:
+    """The file's real path if it is inside project p (no "../" or symlink escapes), else None."""
+    try:
+        target = (p / file).resolve()
+        return target if target.is_relative_to(p.resolve()) else None
+    except Exception:
+        return None
+
+
 def diff(file: str, path: str = "") -> str:
     p = Path(path) if path else current()
     if not p:
         return ""
+    target = _inside(p, file)
+    if not target:
+        return ""
     text = _git(p, "diff", "HEAD", "--", file)
-    if not text and (p / file).is_file():          # untracked: show it as all added
-        body = (p / file).read_text(errors="replace").splitlines()[:400]
+    if not text and target.is_file():              # untracked: show it as all added
+        body = target.read_text(errors="replace").splitlines()[:400]
         text = f"--- /dev/null\n+++ b/{file}\n@@ -0,0 +1,{len(body)} @@\n" + "\n".join("+" + l for l in body)
     return text[:60000]
 
 
 def read(file: str, path: str = "") -> str:
     p = Path(path) if path else current()
-    target = (p / file).resolve() if p else None
-    if not target or not str(target).startswith(str(p.resolve())) or not target.is_file():
+    target = _inside(p, file) if p else None
+    if not target or not target.is_file():
         return ""
     try:
         return target.read_text(errors="replace")[:60000]

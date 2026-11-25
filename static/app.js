@@ -280,8 +280,9 @@ function refreshSoon() {
 }
 
 function handle(m) {
-  if (m.type === "user" || m.type === "assistant_delta" || m.type === "assistant_done" || m.type === "tool") Code.event(m);
-  if (["code_state", "term", "files", "diff", "file", "code_toast"].includes(m.type)) { Code.handle(m); return; }
+  if (m.type === "user" || m.type === "assistant_delta" || m.type === "assistant_done" || m.type === "tool" || m.type === "tool_result") Code.event(m);
+  if (m.type === "tool_result") return;
+  if (["code_state", "term", "files", "diff", "file", "code_toast", "code_sessions", "code_session"].includes(m.type)) { Code.handle(m); return; }
   switch (m.type) {
     case "hello":
       if (m.platform) localize(m.platform);
@@ -342,6 +343,12 @@ function handle(m) {
     case "audio": enqueueAudio(m.gen, m.data, m.text); break;
     case "stop_audio": stopAudio(m.gen); renderStatus(); break;
     case "confirm":
+      if (m.code) {                                   // from the Code tab: answered right there, in the feed
+        S.confirmId = m.id;
+        if (S.view !== "code") showView("code");
+        Code.confirm(m); toNative({ type: "attention" });
+        break;
+      }
       S.confirmId = m.id;
       el.confirmTitle.textContent = `Allow Mike to ${m.summary}?`;
       el.confirmDetail.textContent = m.detail;
@@ -351,6 +358,7 @@ function handle(m) {
       toNative({ type: "attention" });
       break;
     case "confirm_done":
+      Code.event(m);
       if (m.id === S.confirmId) { el.confirm.classList.add("hidden"); S.confirmId = null; }
       addAction(m.allowed ? "check" : "x", m.allowed ? "You allowed it" : "You declined", m.allowed ? "" : "denied");
       break;
@@ -963,7 +971,7 @@ function autosize() {
   el.input.style.height = `${Math.min(180, h)}px`;
   el.input.classList.toggle("scroll", h > 180);
 }
-Code.init({ send, ask: (text) => { ensureAudio().resume?.(); send({ type: "text", text, source: "code" }); }, stop: () => interrupt() });
+Code.init({ send, ask: (text, images) => { ensureAudio().resume?.(); send({ type: "text", text, source: "code", ...(images?.length ? { images } : {}) }); }, stop: () => interrupt() });
 function sendText(text) { text = text.trim(); if (!text) return; ensureAudio().resume?.(); send({ type: "text", text }); if (S.view !== "chat") showView("chat"); }
 const syncSend = () => { el.sendBtn.disabled = !el.input.value.trim(); autosize(); };
 el.input.addEventListener("input", syncSend); syncSend();
@@ -1060,6 +1068,7 @@ async function boot() {
     if (params.has("confirm")) handle({ type: "confirm", id: "x", summary: "delete the file notes.txt", detail: '{\n  "command": "rm ~/notes.txt"\n}' });
     if (params.has("view")) {
       showView(params.get("view"));
+      if (params.get("view") === "code") codeDemo();
       if (params.get("view") === "memory") showMemory({ facts: ["Name is Sam", "Lives in Chicago", "Has a chemistry exam on 3 December"], journal_days: 2, claude_notes: 40 });
       if (params.get("view") === "history") showHistory({ days: [{ date: today, count: 2, first: "What's on my screen?" }], day: today, entries: [{ t: `${today}T09:17:57`, user: "Explain in simple words why rockets stage.", mike: "Rockets stage because carrying dead weight is expensive." }] });
     }
@@ -1110,6 +1119,39 @@ el.setupMicBtn.onclick = () => { ensureAudio().resume?.(); retryMic().then(refre
 el.setupDone.onclick = () => { closeSetup(); ensureAudio().resume?.(); };
 el.setupSkip.onclick = closeSetup;
 
+function codeDemo() {
+  // ?preview&view=code: a sample coding session, for design work on the Code area.
+  handle({ type: "code_state", brain: "Cloudflare · gpt-oss-120b", approval: "ask", project: { name: "todo-api", path: "~/Developer/todo-api", commands: { run: "uvicorn main:app --reload", test: "pytest -q" } },
+    projects: [{ name: "todo-api", path: "~/Developer/todo-api" }, { name: "mike", path: "~/mike" }],
+    changes: [{ file: "main.py", status: "M", add: 24, del: 3 }, { file: "tests/test_todos.py", status: "A", add: 41, del: 0 }],
+    terminals: [{ name: "server", running: true, text: "INFO:     Uvicorn running on http://127.0.0.1:8000\nINFO:     Application startup complete.\n" }] });
+  handle({ type: "user", text: "Add a priority field to todos and filter by it" });
+  handle({ type: "tool", name: "TodoWrite", args: { todos: [{ text: "Add priority to the Todo model", status: "completed" }, { text: "Filter GET /todos by ?priority=", status: "in_progress" }, { text: "Tests for both", status: "pending" }] } });
+  handle({ type: "tool", id: "t1", name: "read_file", args: { file: "main.py" } });
+  handle({ type: "tool_result", id: "t1", output: "from fastapi import FastAPI\n...", error: false });
+  handle({ type: "tool", id: "t2", name: "edit_file", args: { file: "main.py", old: "class Todo(BaseModel):\n    title: str\n    done: bool = False", new: "class Todo(BaseModel):\n    title: str\n    done: bool = False\n    priority: Literal[\"low\", \"medium\", \"high\"] = \"medium\"" } });
+  handle({ type: "tool_result", id: "t2", output: "Edited main.py.", error: false });
+  handle({ type: "tool", id: "t3", name: "run_command", args: { command: "pytest -q" } });
+  handle({ type: "tool_result", id: "t3", error: true, output: "Failed (exit code 1): F.........\n=== FAILURES ===\n___ test_filter_by_priority ___\n    assert r.json() == [high_todo]\nE   NameError: name 'Literal' is not defined\n1 failed, 11 passed in 0.41s" });
+  handle({ type: "tool", id: "t4", name: "edit_file", args: { file: "main.py", old: "from pydantic import BaseModel", new: "from typing import Literal\nfrom pydantic import BaseModel" } });
+  handle({ type: "tool_result", id: "t4", output: "Edited main.py.", error: false });
+  handle({ type: "tool", id: "t5", name: "run_command", args: { command: "pytest -q" } });
+  handle({ type: "tool_result", id: "t5", output: "............\n12 passed in 0.38s", error: false });
+  handle({ type: "assistant_delta", text: "Todos now have a **priority** (low, medium or high, default medium), and `GET /todos?priority=high` filters by it. All 12 tests pass." });
+  handle({ type: "assistant_done", duration_ms: 48200 });
+  handle({ type: "user", text: "Commit it and push to main" });
+  handle({ type: "confirm", code: true, id: "c1", tool: "Bash", summary: "run the command git push origin main", detail: '{\n "command": "git push origin main"\n}' });
+  if (new URLSearchParams(location.search).has("sessions")) {
+    const t = Date.now() / 1000;
+    handle({ type: "code_sessions", sessions: [{ id: "a1b2c3d4e5f6", t: t - 3600, updated: t - 3000, project: "todo-api", first: "Add pagination to GET /todos", turns: 3, changed: 2 },
+      { id: "b1b2c3d4e5f6", t: t - 90000, updated: t - 88000, project: "todo-api", first: "Why do the tests hang on CI?", turns: 1, changed: 0 }] });
+    handle({ type: "code_session", id: "a1b2c3d4e5f6", events: [{ type: "session", t: t - 3600, project: "todo-api" },
+      { type: "user", text: "Add pagination to GET /todos" }, { type: "tool", id: "p1", name: "run_command", args: { command: "pytest -q" } },
+      { type: "tool_result", id: "p1", output: "8 passed in 0.30s", error: false }, { type: "assistant_delta", text: "Added `limit` and `offset` to GET /todos." },
+      { type: "assistant_done", duration_ms: 31000 },
+      { type: "snapshot", changes: [{ file: "main.py", status: "M", add: 9, del: 1 }], diffs: { "main.py": "@@ -10,3 +10,11 @@\n-def list_todos():\n+def list_todos(limit: int = 50, offset: int = 0):" } }] });
+  }
+}
 function demo() {
   handle({ type: "transcript" }); handle({ type: "user", text: "Mike, what's on my screen?" });
   handle({ type: "tool", name: "screenshot", detail: "" });

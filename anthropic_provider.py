@@ -41,7 +41,19 @@ def messages(chat: list[dict]) -> list[dict]:
     for m in chat:
         role = m.get("role")
         if role == "user":
-            out.append({"role": "user", "content": m.get("content") or ""})
+            content = m.get("content") or ""
+            if isinstance(content, list):            # text + pasted images (OpenAI-style parts) -> Claude blocks
+                blocks = []
+                for part in content:
+                    if part.get("type") == "text":
+                        blocks.append({"type": "text", "text": part.get("text", "")})
+                    elif part.get("type") == "image_url":
+                        url = str((part.get("image_url") or {}).get("url", ""))
+                        media, _, data = url.partition(";base64,")
+                        blocks.append({"type": "image", "source": {"type": "base64", "data": data,
+                                                                   "media_type": media.replace("data:", "") or "image/jpeg"}})
+                content = blocks
+            out.append({"role": "user", "content": content})
         elif role == "assistant":
             calls = m.get("tool_calls") or []
             raw = next(((c.get("extra_content") or {}).get("anthropic") for c in calls
