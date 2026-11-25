@@ -162,6 +162,21 @@ evaluator, a duplicate finder). `python -m bench.main_benchmark` runs them again
 free tiers can be slow. Run it on a copy with its own port (`MIKE_PORT`), never against the Mike you use: the
 benchmark approves every step itself.
 
+Results on 25 Nov 2026, free models only (Cloudflare's and Groq's biggest model's daily allowances were
+already used up; NVIDIA, OpenRouter, Gemini and Groq's smaller models were available), one run per task:
+
+| Task (hidden tests) | Run 1 | Run 2, with "check before finishing" |
+|---|---|---|
+| FastAPI to-do API (20) | 5 | 4 |
+| Debug a module (8) | 8 | 1 |
+| Refactor into modules (13) | 0 | 13 |
+| Expression evaluator (32) | 28 | 27 |
+| Duplicate finder (10) | 6 | 6 |
+| **Total (83)** | **47 (57%)** | **51 (61%)** |
+
+Single runs on free models vary a lot (task 2 scored 8 and then 1 with the same setup), so compare totals over
+several runs. For reference, Claude Code with Opus scored 75 on the same tasks on 17 Nov.
+
 ## Known limitations
 
 - **Free tiers are small.** Groq allows about 8,000 tokens a minute and 200,000 a day per model; Cloudflare's
@@ -175,6 +190,9 @@ benchmark approves every step itself.
   (for example Groq's gpt-oss) can't.
 - **One window at a time.** Opening Mike's page in a second window or browser tab takes over from the first.
 - **First start downloads about 150 MB** of voice models.
+- **Free models still claim success too early sometimes.** Mike now sends a coding turn back when files changed
+  but nothing was run, or the last command failed, but a model can still stop on a passing run of the wrong
+  thing. The benchmark's "false done" count is the number to watch.
 
 ## Troubleshooting
 
