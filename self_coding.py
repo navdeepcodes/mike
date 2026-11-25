@@ -643,7 +643,9 @@ class ToolExecutor:
             # Let the new venv *see* Mike's packages (pytest, fastapi, httpx...) after its own, read-only: pip
             # installs land in the project venv and never uninstall anything outside it.
             import site
-            mine = [p for p in site.getsitepackages() if Path(p).resolve().is_relative_to(config.ROOT.resolve())]
+            # Mike's own packages: wherever the Python running Mike keeps them (his .venv when installed normally,
+            # the system's on a CI machine). The link is read-only: installs land in the project's venv.
+            mine = [p for p in site.getsitepackages() if Path(p).is_dir()]
             theirs = subprocess.run([str(bin_dir / "python"), "-c", "import sysconfig;print(sysconfig.get_paths()['purelib'])"],
                                     capture_output=True, text=True, timeout=30).stdout.strip()
             if mine and theirs:
