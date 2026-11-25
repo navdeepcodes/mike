@@ -1060,6 +1060,7 @@ async function boot() {
     if (params.has("confirm")) handle({ type: "confirm", id: "x", summary: "delete the file notes.txt", detail: '{\n  "command": "rm ~/notes.txt"\n}' });
     if (params.has("view")) {
       showView(params.get("view"));
+      if (params.get("view") === "code") codeDemo();
       if (params.get("view") === "memory") showMemory({ facts: ["Name is Sam", "Lives in Chicago", "Has a chemistry exam on 3 December"], journal_days: 2, claude_notes: 40 });
       if (params.get("view") === "history") showHistory({ days: [{ date: today, count: 2, first: "What's on my screen?" }], day: today, entries: [{ t: `${today}T09:17:57`, user: "Explain in simple words why rockets stage.", mike: "Rockets stage because carrying dead weight is expensive." }] });
     }
@@ -1110,6 +1111,20 @@ el.setupMicBtn.onclick = () => { ensureAudio().resume?.(); retryMic().then(refre
 el.setupDone.onclick = () => { closeSetup(); ensureAudio().resume?.(); };
 el.setupSkip.onclick = closeSetup;
 
+function codeDemo() {
+  // ?preview&view=code: a sample coding session, for design work on the Code area.
+  handle({ type: "code_state", brain: "Cloudflare · gpt-oss-120b", project: { name: "todo-api", path: "~/Developer/todo-api", commands: { run: "uvicorn main:app --reload", test: "pytest -q" } },
+    projects: [{ name: "todo-api", path: "~/Developer/todo-api" }, { name: "mike", path: "~/mike" }],
+    changes: [{ file: "main.py", status: "M", add: 24, del: 3 }, { file: "tests/test_todos.py", status: "A", add: 41, del: 0 }],
+    terminals: [{ name: "server", running: true, text: "INFO:     Uvicorn running on http://127.0.0.1:8000\nINFO:     Application startup complete.\n" }] });
+  handle({ type: "user", text: "Add a priority field to todos and filter by it" });
+  handle({ type: "tool", name: "TodoWrite", args: { todos: [{ text: "Add priority to the Todo model", status: "completed" }, { text: "Filter GET /todos by ?priority=", status: "in_progress" }, { text: "Tests for both", status: "pending" }] } });
+  handle({ type: "tool", name: "read_file", args: { file: "main.py" } });
+  handle({ type: "tool", name: "edit_file", args: { file: "main.py", old: "class Todo(BaseModel):\n    title: str\n    done: bool = False", new: "class Todo(BaseModel):\n    title: str\n    done: bool = False\n    priority: Literal[\"low\", \"medium\", \"high\"] = \"medium\"" } });
+  handle({ type: "tool", name: "run_command", args: { command: "pytest -q" } });
+  handle({ type: "assistant_delta", text: "Todos now have a **priority** (low, medium or high, default medium), and `GET /todos?priority=high` filters by it. All 12 tests pass." });
+  handle({ type: "assistant_done", duration_ms: 48200 });
+}
 function demo() {
   handle({ type: "transcript" }); handle({ type: "user", text: "Mike, what's on my screen?" });
   handle({ type: "tool", name: "screenshot", detail: "" });

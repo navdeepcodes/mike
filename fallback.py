@@ -26,6 +26,7 @@ import anthropic_provider
 import config
 import memory
 import mike_tools
+import model_stats
 import projects
 import skills
 
@@ -90,9 +91,9 @@ def _size(model: str) -> float:
 CODE_EXT = (".py", ".js", ".jsx", ".ts", ".tsx", ".html", ".css", ".swift", ".go", ".rs", ".java", ".kt", ".c", ".h", ".cpp", ".rb", ".php", ".sh", ".sql")
 
 
-def _strong(model: str) -> bool:
-    """Not one of the small/lite models (fast, but they make silly mistakes writing code)."""
-    return not re.search(r"lite|mini|nano|small|(?<!\d)(?:3|4|7|8|9|12|14|20)b\b", model.lower())
+def _cap(p: dict, model: str) -> float:
+    """Measured capability of a provider's model (see model_stats)."""
+    return model_stats.capability(f"{p['id']}/{model}", _size(model))
 
 
 def _for_provider(messages: list[dict], pid: str) -> list[dict]:
@@ -372,7 +373,14 @@ TOOL_FUNCS = {f.__name__: f for f in [
 ]}
 # Software-building tools: offered only on programming requests (every tool description costs free-tier tokens).
 DEV_FUNCS = [search_code, mike_tools.project_find, mike_tools.project_use, mike_tools.project_info,
-             mike_tools.terminal_send, mike_tools.terminal_interrupt, mike_tools.self_check, mike_tools.mike_restart]
+             mike_tools.terminal_send, mike_tools.terminal_interrupt, mike_tools.self_check, mike_tools.mike_restart,
+             mike_tools.code_read, mike_tools.code_write, mike_tools.code_edit, mike_tools.code_search,
+             mike_tools.code_bash, mike_tools.code_test, mike_tools.code_lint, mike_tools.code_type_check,
+             mike_tools.code_build, mike_tools.code_git_status, mike_tools.code_git_diff, mike_tools.code_git_checkpoint,
+             mike_tools.code_self_check,
+             mike_tools.code_index, mike_tools.code_dependents, mike_tools.code_deps, mike_tools.code_callers, mike_tools.code_callees,
+             mike_tools.code_search_relevant, mike_tools.code_task_save, mike_tools.code_task_load,
+             mike_tools.code_subagent_spawn, mike_tools.code_subagent_results]
 
 TOOL_FUNCS.update({f.__name__: f for f in DEV_FUNCS})
 
@@ -399,6 +407,11 @@ def _schema(fn) -> dict:
 
 
 DEV_NAMES = {f.__name__ for f in DEV_FUNCS}
+# What a coding turn is offered: the tools DEV_PROMPT teaches, nothing that clicks, types, plays media or sets
+# reminders. (The code_* tools stay callable by Mike's self-coding loop; offering both sets only confused models.)
+CODING_TOOLS = {"read_file", "write_file", "edit_file", "search_code", "run_command", "project_find", "project_use",
+                "project_info", "terminal_start", "terminal_read", "terminal_send", "terminal_stop", "self_check",
+                "mike_restart"}
 TOOLS = [_schema(f) for f in TOOL_FUNCS.values() if f.__name__ not in DEV_NAMES]
 DEV_TOOLS = [_schema(f) for f in DEV_FUNCS]
 
@@ -504,8 +517,115 @@ def _missing(paths: list[str]) -> list[str]:
     return bad
 
 
+KEEP_FULL_STEPS = 3      # the newest tool results stay whole; older ones shrink to a line or two
+
+
+def _tokens(x) -> int:
+    """Rough token count (JSON-ish text runs ~3.2 characters a token; better to overestimate)."""
+    return int(len(x if isinstance(x, str) else json.dumps(x)) / 3.2)
+
+
+def _shrink(msgs: list[dict], keep: int, cut: int) -> list[dict]:
+    tool_idx = [i for i, m in enumerate(msgs) if m["role"] == "tool"]
+    old_tools = set(tool_idx[:-keep] if keep else tool_idx)
+    calls_idx = [i for i, m in enumerate(msgs) if m["role"] == "assistant" and m.get("tool_calls")]
+    old_calls = set(calls_idx[:-keep] if keep else calls_idx)
+    out = []
+    for i, m in enumerate(msgs):
+        if i in old_tools and len(m.get("content") or "") > cut + 100:
+            m = {**m, "content": m["content"][:cut] + f"\n[... older output trimmed, {len(m['content'])} chars]"}
+        elif i in old_calls:
+            calls = []
+            for c in m["tool_calls"]:
+                args = c.get("function", {}).get("arguments") or ""
+                if len(args) > cut + 100:
+                    try:
+                        a = json.loads(args)
+                        a = {k: (f"[{len(v)} chars, already applied]" if isinstance(v, str) and len(v) > 200 else v) for k, v in a.items()}
+                        args = json.dumps(a)
+                    except Exception:
+                        args = args[:cut]
+                    c = {**c, "function": {**c["function"], "arguments": args}}
+                calls.append(c)
+            m = {**m, "tool_calls": calls}
+        out.append(m)
+    return out
+
+
+def _compact(msgs: list[dict], budget: int | None = None) -> list[dict]:
+    """Keep a long coding turn inside small models' request limits. Older tool output is cut to its head, and file
+    contents already written become a short note (the file is the record; read_file brings it back). With a token
+    budget (learned from the provider's own limit), squeeze harder until the history fits."""
+    out = _shrink(msgs, KEEP_FULL_STEPS, 300)
+    if budget is None:
+        return out
+    for keep, cut in ((2, 300), (1, 200), (1, 120), (0, 120), (0, 60)):
+        if _tokens(out) <= budget:
+            break
+        out = _shrink(msgs, keep, cut)
+    return out
+
+
+# ---- reading any provider's limit errors (Groq, OpenAI, OpenRouter, NVIDIA, Gemini, Cloudflare all word them differently)
+_LIMIT_PATTERNS = [
+    r"(?:per minute|too large)[^:]*:\s*Limit (\d+)",                      # Groq / OpenAI: "... (TPM): Limit 8000"
+    r"maximum context length is (\d+)",                                   # OpenAI, OpenRouter, vLLM (NVIDIA)
+    r"maximum number of tokens allowed \((\d+)\)",                        # Gemini
+    r"context (?:length|window)[^0-9]{0,40}(\d{3,7})",                     # others that name a number
+]
+_TOO_BIG = re.compile(r"\b413\b|too large|too long|context.length|context.window|too many (?:input )?tokens|reduce the length", re.I)
+
+
+def _limit_from_error(msg: str, sent_tokens: int) -> int | None:
+    """A model's request limit, from its provider's error. No number given but plainly too big: what we sent, less a margin."""
+    if re.search(r"daily|per day", msg, re.I):
+        return None                                         # a daily allowance is not a size limit
+    for pat in _LIMIT_PATTERNS:
+        m = re.search(pat, msg, re.I)
+        if m:
+            return int(m.group(1))
+    return int(sent_tokens * 0.75) if sent_tokens and _TOO_BIG.search(msg) else None
+
+
+def _retry_after(msg: str) -> float | None:
+    """Seconds until a limit clears, however the provider says it."""
+    m = re.search(r"(?:try|retry) (?:again )?in (?:(\d+)h)?(?:(\d+)m(?!s))?([\d.]+)s", msg, re.I)  # Groq, OpenAI, Gemini, header
+    if m:
+        return int(m.group(1) or 0) * 3600 + int(m.group(2) or 0) * 60 + float(m.group(3))
+    m = re.search(r'retryDelay"?\s*:\s*"?([\d.]+)s', msg) or re.search(r"(?:try|retry) (?:again )?(?:after|in) ([\d.]+) ?(?:s\b|sec)", msg, re.I)
+    if m:
+        return float(m.group(1))
+    m = re.search(r"(?:try|retry) (?:again )?in ([\d.]+) ?ms\b", msg, re.I)
+    return float(m.group(1)) / 1000 if m else None
+
+
+def _reply_budget(lane: str) -> int:
+    """Room for the model's answer. Some providers count it against the per-minute limit (Groq does), so once a
+    model's limit is known the answer gets a quarter of it; unknown: the usual 4000."""
+    cap = model_stats.limit(lane)
+    return max(800, min(4000, cap // 4)) if cap else 4000
+
+
+def _soonest_free(failed_until: dict, lanes: list[tuple]) -> float | None:
+    """Seconds until the first lane is usable again (None if one is free now or every provider is out for long)."""
+    now, waits = time.time(), []
+    for p, m in lanes:
+        until = max(failed_until.get(p["id"], 0), failed_until.get(f"{p['id']}/{m}", 0))
+        if until <= now:
+            return None
+        waits.append(until - now)
+    return min(waits) if waits else None
+
+
 class _ProviderDown(Exception):
     pass
+
+
+class _Escalate(Exception):
+    """The current model keeps failing at this task: hand it (history and all) to a more capable one."""
+
+
+ESCALATE_AFTER = 3     # failed steps in a row before a coding task moves up a model
 
 
 class _Skip(Exception):
@@ -523,7 +643,9 @@ class FallbackBrain:
         self.failed_until: dict[str, float] = {}   # "provider" or "provider/model" -> benched until
         self.last_used = ""                    # "Groq · openai/gpt-oss-120b"
         self._lat: dict[str, float] = {}      # how long each model took to answer its check (seconds)
-        self.dev_until = 0.0                   # programming mode (dev tools + rules) stays on this long after a coding request
+        self.dev_until = 0.0
+        self._weak: set[str] = set()           # models that struggled on the current request
+        self._can_escalate = False                   # programming mode (dev tools + rules) stays on this long after a coding request
 
     # ---- providers --------------------------------------------------------
     def available(self) -> list[dict]:
@@ -697,26 +819,66 @@ class FallbackBrain:
                     lanes += [(p, m) for m in self.lanes(p)]
             lanes.sort(key=lambda pm: _rank(pm[0]["id"], pm[1], len(lanes)))   # stable: provider order breaks ties
             lanes = preferred_first(lanes)
-            if time.time() < self.dev_until:                  # programming wants the strongest models, not the fastest small ones
-                lanes = [l for l in lanes if _strong(l[1])] or lanes
-            for p, model in lanes:
-                if self.failed_until.get(p["id"], 0) > time.time():
-                    continue
-                try:
-                    text = await self._loop(client, p, model, system)
-                    self.last_used = f"{p['name']} · {model}"
-                    log.info("backup answered with %s", self.last_used)
-                    return text
-                except _ProviderDown as e:
-                    msg = str(e)
-                    log.info("%s %s unavailable (%s); trying the next one", p["name"], model, msg[:90])
-                    last_err = e
-                    if "429" in msg:          # that model's per-minute limit: skip it until it frees up
-                        m = re.search(r"try again in (?:(\d+)m)?([\d.]+)s", msg)
-                        wait = (int(m.group(1) or 0) * 60 + float(m.group(2))) if m else 60
-                        self.failed_until[f"{p['id']}/{model}"] = time.time() + min(max(wait, 5), 600)
-                    else:                     # provider down or key rejected: skip it for a while
-                        self.failed_until[p["id"]] = time.time() + 300
+            self._weak: set[str] = set()                        # lanes that struggled on this request
+            # A coding task is minutes of work: when every model is only briefly rate-limited, wait for the first
+            # to free up instead of abandoning the task (free tiers allow just a few calls a minute).
+            waited, seen_len = 0.0, len(self.history)
+            while True:
+                escalated = False
+                for p, model in self._order(lanes):
+                    if self.failed_until.get(p["id"], 0) > time.time() or self.failed_until.get(f"{p['id']}/{model}", 0) > time.time():
+                        continue
+                    here = f"{p['id']}/{model}"
+                    self._can_escalate = any(_cap(q, n) > _cap(p, model) for q, n in lanes if f"{q['id']}/{n}" not in self._weak | {here})
+                    try:
+                        text = await self._loop(client, p, model, system)
+                        self.last_used = f"{p['name']} · {model}"
+                        log.info("backup answered with %s", self.last_used)
+                        return text
+                    except _Escalate:
+                        self._weak.add(here)
+                        escalated = True
+                        break                                          # re-order: the most capable model goes next
+                    except _ProviderDown as e:
+                        msg = str(e)
+                        log.info("%s %s unavailable (%s); trying the next one", p["name"], model, msg[:90])
+                        last_err = e
+                        lim = _limit_from_error(msg, getattr(self, "_last_sent", 0))
+                        if lim:
+                            model_stats.set_limit(here, lim)
+                        wait = _retry_after(msg)
+                        if "429" in msg and re.search(r"daily|per day|quota", msg, re.I):
+                            # A spent daily allowance: Groq's is per model and says when it clears; Cloudflare's is per
+                            # account and doesn't (then the whole provider rests).
+                            if wait:
+                                self.failed_until[here] = time.time() + wait
+                            else:
+                                self.failed_until[p["id"]] = time.time() + 6 * 3600
+                        elif "429" in msg:        # that model's per-minute limit: skip it until it frees up
+                            self.failed_until[here] = time.time() + min(max(wait or 60, 5), 600)
+                        elif lim or _TOO_BIG.search(msg):
+                            self.failed_until[here] = time.time() + (5 if lim else 300)   # retry it smaller (limit learned)
+                        elif "empty reply" in msg:
+                            model_stats.record(here, False)
+                            self.failed_until[here] = time.time() + 120               # that model, not the provider
+                        elif "Timeout" in msg or "timed out" in msg.lower():
+                            self.failed_until[f"{p['id']}/{model}"] = time.time() + 300   # that model is slow, not the provider
+                        else:                     # provider down or key rejected: skip it for a while
+                            self.failed_until[p["id"]] = time.time() + 300
+                if escalated:
+                    continue                                           # same task, history kept, new model order
+                soonest = _soonest_free(self.failed_until, lanes)
+                if soonest is None:
+                    soonest = 0.0                      # a model freed up during this pass: go round again
+                # Coding can wait minutes for a free model; a chat answer only briefly (the router may not have
+                # switched coding mode on yet, so a short wait applies to every request).
+                if soonest > 90 or waited > (300 if time.time() < self.dev_until else 45):
+                    break
+                if len(self.history) != seen_len:                  # the task moved on since the last wait
+                    waited, seen_len = 0.0, len(self.history)
+                log.info("every model is busy; waiting %.0fs for one to free up", soonest)
+                await asyncio.sleep(soonest + 1)
+                waited += soonest + 1
         if not any(load_keys().get(p["id"]) for p in PROVIDERS if not p.get("local")):
             raise RuntimeError("No model is set up yet. Add a free key in Settings > Model (Groq and Gemini take a minute "
                                "to get), start Ollama, or install Claude Code.")
@@ -793,15 +955,20 @@ class FallbackBrain:
     async def _rounds(self, client, p, model, system, headers, request, seen, per_tool, nudged) -> str:
         said, used_tool = "", False
         targets = _targets(request)
+        lane, streak = f"{p['id']}/{model}", 0
         for rnd in range(36):
             dev = time.time() < self.dev_until          # the router may switch coding mode on while we're already working
             if rnd >= (36 if dev else 16):
                 break
             # An action request with no tool used yet: hold the words back until we know they're true.
             hold = (not used_tool and bool(ACTION_RE.search(request)) and "act" not in nudged) or bool(_missing(targets))
-            body = {"model": model, "stream": True, "tools": TOOLS + (DEV_TOOLS if dev else []), "temperature": 0.2 if dev else 0.4, "max_tokens": 1200 if p["id"] == "groq" else 4000,   # reasoning models spend part of it thinking
+            body = {"model": model, "stream": True, "tools": self._tool_schemas(dev), "temperature": 0.2 if dev else 0.4, "max_tokens": _reply_budget(lane),   # reasoning models spend part of it thinking
                     
-                    "messages": [{"role": "system", "content": system + ("\n\n" + DEV_PROMPT if dev and DEV_PROMPT not in system else "") + self._now_note()}] + self._payload_history()}
+                    "messages": [{"role": "system", "content": system + ("\n\n" + DEV_PROMPT if dev and DEV_PROMPT not in system else "") + self._now_note()}]}
+            cap = model_stats.limit(lane)        # learned from the provider's own "Limit N" errors
+            budget = int(cap * 0.6) - _tokens(body["messages"]) - _tokens(body["tools"]) - body["max_tokens"] if cap else None
+            body["messages"] += self._payload_history(max(budget, 800) if budget is not None else None)
+            self._last_sent = _tokens(body)
             body["messages"] = _for_provider(body["messages"], p["id"])
             if p["id"] == "groq" and "gpt-oss" in model:
                 body["reasoning_effort"] = "high" if dev else "medium"     # think before acting: far fewer silly moves (more for code)
@@ -916,6 +1083,8 @@ class FallbackBrain:
                     nudged.add("say")             # went quiet after its tools: get a one-line answer
                     self.history.append({"role": "user", "content": NUDGE_SAY, "nudge": True})
                     continue
+                if not (said + text).strip():
+                    raise _ProviderDown("model returned an empty reply after the recovery nudge")
                 said += text
                 self.history.append({"role": "assistant", "content": text})
                 return said
@@ -942,9 +1111,28 @@ class FallbackBrain:
                     if c["name"] in ("edit_file", "write_file", "terminal_send", "terminal_start", "terminal_interrupt", "terminal_stop"):
                         seen.clear()           # the files or terminals changed: re-running a test or command is now a fresh question
                 self.history.append({"role": "tool", "tool_call_id": c["id"] or f"call_{i}", "content": result[:3000]})
+                ok = model_stats.step_ok(result)
+                model_stats.record(lane, ok)
+                streak = 0 if ok else streak + 1
+            if dev and streak >= ESCALATE_AFTER and self._can_escalate:
+                log.info("%s failed %d steps in a row; moving the task to a more capable model", lane, streak)
+                raise _Escalate(lane)
         return said
 
-    def _payload_history(self) -> list[dict]:
+    def _order(self, lanes: list[tuple]) -> list[tuple]:
+        """Which model tries first. Chat: the usual order (quick answers). Coding: the fastest model that is at least
+        as capable as the median available one, measured from real results; after struggling, the most capable."""
+        if time.time() >= self.dev_until or len(lanes) < 2:
+            return lanes
+        fresh = [l for l in lanes if f"{l[0]['id']}/{l[1]}" not in self._weak] or lanes
+        if self._weak:
+            return sorted(fresh, key=lambda l: -_cap(*l))
+        caps = sorted(_cap(*l) for l in fresh)
+        bar = caps[len(caps) // 2]
+        able = sorted((l for l in fresh if _cap(*l) >= bar), key=lambda l: self._lat.get(l[1], 99))
+        return able + sorted((l for l in fresh if _cap(*l) < bar), key=lambda l: -_cap(*l))
+
+    def _payload_history(self, budget: int | None = None) -> list[dict]:
         """Recent turns only, with the [context] line moved to the end (models tend to echo a leading one)."""
         starts = [i for i, m in enumerate(self.history) if m["role"] == "user" and not m.get("nudge")]
         recent = self.history[starts[-4]:] if len(starts) > 4 else list(self.history)
@@ -957,11 +1145,18 @@ class FallbackBrain:
             if m["role"] == "user" and m["content"].startswith("[context:"):
                 m = {"role": "user", "content": m["content"].partition("\n")[2]}   # context goes in the system note
             out.append({k: v for k, v in m.items() if k != "nudge"})
-        return out
+        return _compact(out, budget)
 
     def _request_text(self) -> str:
         last = next((m["content"] for m in reversed(self.history) if m["role"] == "user" and not m.get("nudge")), "")
         return last.partition("\n")[2] if last.startswith("[context:") else last
+
+    def _tool_schemas(self, dev: bool) -> list[dict]:
+        """Tools for this turn. Coding gets only the coding tools: every description is sent on every step, and all
+        58 (~4,400 tokens) used up Groq's free per-minute budget in two calls and Cloudflare's daily one in one task."""
+        if not dev:
+            return TOOLS
+        return [s for s in TOOLS + DEV_TOOLS if s["function"]["name"] in CODING_TOOLS]
 
     def _now_note(self) -> str:
         last = next((m["content"] for m in reversed(self.history) if m["role"] == "user" and not m.get("nudge")), "")

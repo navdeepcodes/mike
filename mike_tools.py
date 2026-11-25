@@ -3,18 +3,24 @@
 Claude Code starts this automatically (see data/mcp.json). The camera frame
 comes from the HUD in your browser via Mike's local server.
 """
+import hashlib
 import json
 import os
 import subprocess
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP, Image
 
+import config
 import memory
+import projects
 import skills
+import self_coding
 
 MIKE_URL = os.environ.get("MIKE_URL", f"http://127.0.0.1:{os.environ.get('MIKE_PORT', '8777')}")
+TASK_STATE_ROOT = Path(os.environ.get("MIKE_TASK_STATE_DIR", "/tmp/mike_tasks"))
 mcp = FastMCP("mike")
 
 
@@ -416,6 +422,325 @@ def notify(title: str, message: str) -> str:
     import desktop
     desktop.notify(title, message)
     return "Notification shown."
+
+
+def _get_project_path() -> Path:
+    """Get the current project path, falling back to Mike's root."""
+    import projects
+    current = projects.current()
+    return Path(current) if current else config.ROOT
+
+
+def _task_manager_for_project(project_path: Path):
+    from self_coding import TaskManager
+    project_key = hashlib.sha256(str(project_path.resolve()).encode()).hexdigest()[:16]
+    return TaskManager(TASK_STATE_ROOT / project_key)
+
+
+def _tool_output(result) -> str:
+    return result.output if result.success else f"Failed: {result.error or result.output or 'tool execution failed'}"
+
+
+@mcp.tool()
+def code_read(path: str, start: int = 0, end: int = 0) -> str:
+    """Read a file from the current project. Give start and end line numbers to read just that part."""
+    from self_coding import ToolExecutor, DevSession, CodeIndexer
+    project_path = _get_project_path()
+    session = DevSession("read", "read file", project_path)
+    executor = ToolExecutor(project_path, session)
+    result = executor.read_file(path, start, end)
+    return _tool_output(result)
+
+
+@mcp.tool()
+def code_write(path: str, content: str) -> str:
+    """Create or overwrite a file in the current project. Use for code, configs, docs."""
+    from self_coding import ToolExecutor, DevSession
+    project_path = _get_project_path()
+    session = DevSession("write", "write file", project_path)
+    executor = ToolExecutor(project_path, session)
+    result = executor.write_file(path, content)
+    return _tool_output(result)
+
+
+@mcp.tool()
+def code_index() -> str:
+    """Build and retrieve codebase index for intelligent file search.
+    Returns indexed modules, imports, call graphs, and keyword associations."""
+    from self_coding import CodeIndexer
+    project_path = _get_project_path()
+    indexer = CodeIndexer(project_path)
+    context = indexer.index_project()
+
+    lines = []
+    lines.append(f"Language: {context.language}")
+    lines.append(f"\nKeywords per file (sample):")
+    for file_path, terms in list(context.keywords.items())[:5]:
+        terms_str = ", ".join(list(terms)[:5])
+        lines.append(f"  {file_path}: [{terms_str}]")
+
+    lines.append(f"\nFile dependencies (sample):")
+    for file_path, deps in list(context.file_deps.items())[:5]:
+        deps_str = ", ".join(list(deps)[:3])
+        lines.append(f"  {file_path} -> {deps_str}")
+
+    lines.append(f"\nExports (sample):")
+    for export_file, importers in list(context.exports.items())[:5]:
+        importers_str = ", ".join(importers[:3])
+        lines.append(f"  {export_file} <- {importers_str}")
+
+    lines.append(f"\nCall graph sample (first function):")
+    first_func = list(context.call_graph.keys())[0] if context.call_graph else "none"
+    lines.append(f"  {first_func} -> {context.call_graph.get(first_func, [])[:3]}")
+
+    lines.append(f"\nClass hierarchy sample (first class):")
+    first_class = list(context.class_hierarchy.keys())[0] if context.class_hierarchy else "none"
+    lines.append(f"  {first_class} -> {context.class_hierarchy.get(first_class, 'none')}")
+
+    lines.append(f"\nRetrieve relevant files with: code_search")
+    lines.append(f"Get dependents with: code_dependents")
+    lines.append(f"Get dependencies with: code_deps")
+    lines.append(f"Get callers with: code_callers")
+    lines.append(f"Get callee with: code_callees")
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def code_dependents(path: str = "") -> str:
+    """Get files that depend on the given file/path."""
+    from self_coding import CodeIndexer
+    project_path = _get_project_path()
+    indexer = CodeIndexer(project_path)
+    context = indexer.index_project()
+    file_path = path if path else ""
+    dependents = context.exports.get(file_path, [])
+    return f"Files that depend on {file_path}: {dependents if dependents else 'none'}"
+
+
+@mcp.tool()
+def code_deps(path: str = "") -> str:
+    """Get files that the given file depends on."""
+    from self_coding import CodeIndexer
+    project_path = _get_project_path()
+    indexer = CodeIndexer(project_path)
+    context = indexer.index_project()
+    file_path = path if path else ""
+    deps = context.file_deps.get(file_path, [])
+    return f"Files {file_path} depends on: {deps if deps else 'none'}"
+
+
+@mcp.tool()
+def code_callers(func: str = "") -> str:
+    """Get functions that call the given function."""
+    from self_coding import CodeIndexer
+    project_path = _get_project_path()
+    indexer = CodeIndexer(project_path)
+    context = indexer.index_project()
+    callers = context.reverse_call_graph.get(func, [])
+    return f"Functions that call {func}: {callers if callers else 'none'}"
+
+
+@mcp.tool()
+def code_callees(func: str = "") -> str:
+    """Get functions called by the given function."""
+    from self_coding import CodeIndexer
+    project_path = _get_project_path()
+    indexer = CodeIndexer(project_path)
+    context = indexer.index_project()
+    callee = context.call_graph.get(func, [])
+    return f"Functions called by {func}: {callee if callee else 'none'}"
+
+
+@mcp.tool()
+def code_search_relevant(query: str, max_files: int = 10) -> str:
+    """Find files most relevant to a query using semantic code indexing."""
+    from self_coding import CodeIndexer
+    project_path = _get_project_path()
+    indexer = CodeIndexer(project_path)
+    results = indexer.retrieve_relevant(query, max_files)
+    if not results:
+        return f"No files found matching '{query}'"
+    lines = [f"Files relevant to '{query}':"]
+    for file_path, score in results:
+        lines.append(f"  {file_path} (score: {score})")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def code_task_save(goal: str = "", step: int = 0, notes: str = "") -> str:
+    """Save current task state for resume after restart."""
+    project_path = _get_project_path()
+    task_manager = _task_manager_for_project(project_path)
+    if goal:
+        task_manager.active_goal = goal
+    if step > 0:
+        task_manager.completed_steps = list(range(1, step + 1))
+    task_manager.notes = notes
+    task_manager.save_state()
+    return f"Task state saved: {task_manager.active_goal} (through step {step})"
+
+
+@mcp.tool()
+def code_task_load() -> str:
+    """Load saved task state."""
+    project_path = _get_project_path()
+    task_manager = _task_manager_for_project(project_path)
+    if task_manager.active_goal:
+        return (f"Resumed task: {task_manager.active_goal}\n"
+                f"Completed steps: {task_manager.completed_steps}\n"
+                f"Pending actions: {len(task_manager.pending_actions)}\n"
+                f"Notes: {task_manager.notes}")
+    return "No saved task state found."
+
+
+@mcp.tool()
+def code_subagent_spawn(task_description: str) -> str:
+    """Start a background coding subagent for an independent task in the current project."""
+    from subagents import spawn
+    return spawn(_get_project_path(), task_description)
+
+
+@mcp.tool()
+def code_subagent_results(agent_id: str = "") -> str:
+    """Get status and results for a subagent, optionally selecting its ID."""
+    from subagents import results
+    return results(agent_id)
+
+
+@mcp.tool()
+def code_edit(path: str, old: str, new: str, replace_all: bool = False) -> str:
+    """Change part of an existing file: replace the exact text old with new."""
+    from self_coding import ToolExecutor, DevSession
+    project_path = _get_project_path()
+    session = DevSession("edit", "edit file", project_path)
+    executor = ToolExecutor(project_path, session)
+    result = executor.edit_file(path, old, new, replace_all)
+    return _tool_output(result)
+
+
+@mcp.tool()
+def code_search(pattern: str, path: str = "") -> str:
+    """Search the project's files for text (grep)."""
+    from self_coding import ToolExecutor, DevSession
+    project_path = _get_project_path()
+    session = DevSession("search", "search code", project_path)
+    executor = ToolExecutor(project_path, session)
+    result = executor.search_code(pattern, path)
+    return _tool_output(result)
+
+
+@mcp.tool()
+def code_bash(command: str, cwd: str = "", timeout: int = 120) -> str:
+    """Run a shell command in the project directory."""
+    from self_coding import ToolExecutor, DevSession
+    project_path = _get_project_path()
+    session = DevSession("bash", "run command", project_path)
+    executor = ToolExecutor(project_path, session)
+    work_dir = project_path / cwd if cwd else project_path
+    result = executor._run_command(command, cwd=work_dir, timeout=timeout)
+    return _tool_output(result)
+
+
+@mcp.tool()
+def code_test() -> str:
+    """Run the project's test suite and return results."""
+    from self_coding import ToolExecutor, DevSession, ProjectDetector
+    project_path = _get_project_path()
+    session = DevSession("test", "run tests", project_path)
+    executor = ToolExecutor(project_path, session)
+    detector = ProjectDetector(project_path)
+    result = executor.run_tests(detector)
+    return f"Tests: {result.passed}/{result.total} passed ({result.failed} failed, {result.errors} errors)\nFramework: {result.framework}\nOutput:\n{result.output[-3000:]}"
+
+
+@mcp.tool()
+def code_lint() -> str:
+    """Run the project's linter."""
+    from self_coding import ToolExecutor, DevSession, ProjectDetector
+    project_path = _get_project_path()
+    session = DevSession("lint", "run linter", project_path)
+    executor = ToolExecutor(project_path, session)
+    detector = ProjectDetector(project_path)
+    result = executor.run_lint(detector)
+    return result.output
+
+
+@mcp.tool()
+def code_type_check() -> str:
+    """Run the project's type checker."""
+    from self_coding import SelfCodingAgent, DevSession, ToolExecutor, ProjectDetector
+    import projects
+    current = projects.current()
+    project_path = Path(current) if current else config.ROOT
+    session = DevSession("type_check", "run type checker", project_path)
+    executor = ToolExecutor(project_path, session)
+    detector = ProjectDetector(project_path)
+    result = executor.run_type_check(detector)
+    return result.output
+
+
+@mcp.tool()
+def code_build() -> str:
+    """Run the project's build command."""
+    from self_coding import SelfCodingAgent, DevSession, ToolExecutor, ProjectDetector
+    import projects
+    current = projects.current()
+    project_path = Path(current) if current else config.ROOT
+    session = DevSession("build", "run build", project_path)
+    executor = ToolExecutor(project_path, session)
+    detector = ProjectDetector(project_path)
+    result = executor.run_build(detector)
+    return result.output
+
+
+@mcp.tool()
+def code_git_status() -> str:
+    """Show git status."""
+    from self_coding import SelfCodingAgent, DevSession, ToolExecutor, ProjectDetector
+    import projects
+    current = projects.current()
+    project_path = Path(current) if current else config.ROOT
+    session = DevSession("git", "git status", project_path)
+    executor = ToolExecutor(project_path, session)
+    result = executor.git_status()
+    return result.output
+
+
+@mcp.tool()
+def code_git_diff(staged: bool = False) -> str:
+    """Show git diff."""
+    from self_coding import SelfCodingAgent, DevSession, ToolExecutor, ProjectDetector
+    import projects
+    current = projects.current()
+    project_path = Path(current) if current else config.ROOT
+    session = DevSession("git", "git diff", project_path)
+    executor = ToolExecutor(project_path, session)
+    result = executor.git_diff(staged)
+    return result.output
+
+
+@mcp.tool()
+def code_git_checkpoint(label: str) -> str:
+    """Create a git checkpoint (stash + branch) before risky changes."""
+    from self_coding import SelfCodingAgent, DevSession, ToolExecutor, ProjectDetector
+    import projects
+    current = projects.current()
+    project_path = Path(current) if current else config.ROOT
+    session = DevSession("git", "git checkpoint", project_path)
+    executor = ToolExecutor(project_path, session)
+    result = executor.git_checkpoint(label)
+    return result.output
+
+
+@mcp.tool()
+def code_self_check() -> str:
+    """Enhanced self-check: compiles, runs tests, linter, type checker."""
+    from self_coding import enhanced_self_check
+    import projects
+    current = projects.current()
+    project_path = str(current) if current else str(config.ROOT)
+    return enhanced_self_check(project_path)
 
 
 if __name__ == "__main__":

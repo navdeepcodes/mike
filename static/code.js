@@ -134,16 +134,35 @@ function working() {
   if (!n) { n = h("div", "cx-working"); n.id = "cxWorking"; n.append(h("span", "cx-dots"), h("span", "t", "Working…"), h("small", "")); }
   return n;
 }
+function took(ms) { const s = Math.round(ms / 1000); return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, "0")}s`; }
 function tickWorking() {
   const n = $("cxWorking"); if (!n) return;
   const s = Math.floor((Date.now() - C.workStart) / 1000);
   n.querySelector("small").textContent = s >= 3 ? `${s}s` : "";
 }
+// Line diff (LCS) so an edit shows what really changed, with unchanged lines as context, like Claude Code.
+function lineDiff(oldT, newT) {
+  const a = String(oldT || "").split("\n"), b = String(newT || "").split("\n");
+  if (a.length * b.length > 250000) return [...a.map((t) => ["del", t]), ...b.map((t) => ["add", t])];
+  const L = Array.from({ length: a.length + 1 }, () => new Uint16Array(b.length + 1));
+  for (let i = a.length - 1; i >= 0; i--) for (let j = b.length - 1; j >= 0; j--) L[i][j] = a[i] === b[j] ? L[i + 1][j + 1] + 1 : Math.max(L[i + 1][j], L[i][j + 1]);
+  const out = []; let i = 0, j = 0;
+  while (i < a.length && j < b.length) {
+    if (a[i] === b[j]) { out.push(["ctx", a[i]]); i++; j++; }
+    else if (L[i + 1][j] >= L[i][j + 1]) out.push(["del", a[i++]]);
+    else out.push(["add", b[j++]]);
+  }
+  while (i < a.length) out.push(["del", a[i++]]);
+  while (j < b.length) out.push(["add", b[j++]]);
+  return out;
+}
+function diffCounts(oldT, newT) {
+  const d = lineDiff(oldT, newT);
+  return { add: d.filter((x) => x[0] === "add").length, del: d.filter((x) => x[0] === "del").length };
+}
 function diffBlock(oldT, newT) {
   const box = h("div", "cx-diff");
-  const add = (cls, t) => { box.append(h("div", "ln " + cls, (cls === "del" ? "− " : "+ ") + t)); };
-  String(oldT || "").split("\n").slice(0, 14).forEach((l) => add("del", l));
-  String(newT || "").split("\n").slice(0, 14).forEach((l) => add("add", l));
+  lineDiff(oldT, newT).slice(0, 40).forEach(([k, t]) => box.append(h("div", "ln " + k, (k === "del" ? "− " : k === "add" ? "+ " : "  ") + t)));
   return box;
 }
 function stepNode(m) {
@@ -157,6 +176,10 @@ function stepNode(m) {
   const row = h("div", "cx-step");
   const head = h("button", "cx-step-head"); head.type = "button";
   head.append(icon(ic, "ic"), h("b", "", verb), h("code", "", label));
+  if (isEdit && (a.old != null || a.new != null || a.content != null)) {
+    const n = a.content != null ? { add: a.content.split("\n").length, del: 0 } : diffCounts(a.old, a.new);
+    const c = h("span", "cx-cnt"); c.append(h("em", "add", `+${n.add}`), h("em", "del", `−${n.del}`)); head.append(c);
+  }
   if (body) { head.append(icon("chev", "chev")); head.onclick = () => row.classList.toggle("open"); } else head.classList.add("flat");
   row.append(head);
   if (body) { const wrap = h("div", "cx-step-body"); wrap.append(body); row.append(wrap); }
@@ -188,6 +211,7 @@ function feedEvent(m) {
       C.turn = null;
       if (m.error) feedAdd(h("div", "cx-note err", "Something went wrong."));
       else if (m.interrupted) feedAdd(h("div", "cx-note", "Stopped."));
+      else if (m.duration_ms >= 1000) feedAdd(h("div", "cx-took", `Worked for ${took(m.duration_ms)}`));
       clearTimeout(C.refresh); C.refresh = setTimeout(() => api.send({ type: "code_get" }), 500);
       break;
     case "tool": {
