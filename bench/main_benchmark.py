@@ -3,6 +3,7 @@
 import asyncio
 import json
 import os
+import re
 import sys
 import tempfile
 import time
@@ -138,80 +139,15 @@ You have full access to the working directory. Use the tools to create files, ru
 
 
 # Task definitions (the text given to the model - tests are HIDDEN)
+# The task text each model gets (tests stay hidden). Same wording as the Nov 2026 Claude Code vs Mike run,
+# which states the contract the hidden tests check (routes, file names, entry points).
+COMMON = "\n\nWork only inside the current directory. Use `python` and `pip` from PATH (an isolated venv). Verify your work by running tests before you say you're done."
 TASKS = {
-    "task1_fastapi_todo": """Build a FastAPI todo API with the following requirements:
-
-- SQLite storage using a temp file (e.g., /tmp/todo.db or similar)
-- JWT token authentication (signup, login endpoints)
-- CRUD endpoints for todos: create, read (with filtering by completed status), update, delete
-- Pagination on list endpoint (skip, limit)
-- Each todo has: id, title, description, completed, created_at, owner_id
-- Proper error handling (404, 401, 400)
-- requirements.txt with all dependencies
-- The API should be runnable and testable
-
-Work in the current directory. Create all necessary files.""",
-
-    "task2_debug_module": """A 4-file Python module in the current directory has 5 bugs. The tests are failing. Fix all bugs without changing the test files.
-
-Files to examine:
-- calculator.py - basic math operations
-- processor.py - data processing with threading
-- models.py - data models with datetime handling
-- utils.py - utility functions
-
-Run the tests to see what fails, then fix the bugs. The bugs include:
-- An off-by-one error
-- A wrong default argument (mutable default)
-- A timezone-related bug
-- A race condition in threading
-- A silently swallowed exception
-
-Do not modify test files. Only fix the source files.""",
-
-    "task3_refactor_script": """A 300-line messy script (messy_script.py) exists in the current directory with a visible test suite (test_messy.py).
-
-Refactor it into 3 clean modules with a clear interface:
-- parser.py - input parsing logic
-- processor.py - core processing logic
-- formatter.py - output formatting
-
-Requirements:
-- Keep ALL existing tests passing (both visible and hidden)
-- The new modules must have a clean public API
-- No duplicate code
-- Each module should have a single responsibility
-- The original messy_script.py should be replaced by a thin main.py that uses the new modules
-
-Run tests frequently to ensure nothing breaks.""",
-
-    "task4_expression_evaluator": """Write an expression evaluator in Python that handles:
-- Basic operators: +, -, *, /, ^ (power)
-- Parentheses for grouping
-- Unary minus (e.g., -5, -(3+2))
-- Functions: max(a,b), min(a,b), abs(x), sqrt(x), pow(x,y)
-- Helpful error messages for: division by zero, unmatched parentheses, unknown tokens, invalid syntax
-
-Create:
-- evaluator.py with evaluate(expression: str) -> float
-- test_evaluator.py with comprehensive tests (the visible ones are basic)
-
-The hidden tests cover 30 edge cases including: nested parentheses, operator precedence, unary minus edge cases, function calls, whitespace handling, empty input, and error messages.""",
-
-    "task5_duplicate_finder": """Build a CLI tool that finds duplicate files in a folder.
-
-Requirements the model must design:
-- Recursive directory traversal
-- Content-based deduplication (hash files, not just names)
-- Handle symlinks properly (don't follow by default, or detect cycles)
-- Handle empty files
-- Handle permission errors gracefully
-- --delete flag with dry-run by default (show what would be deleted)
-- --dry-run flag explicit
-- Progress indication for large folders
-- Output format: groups of duplicates with paths and sizes
-
-Create a complete, runnable CLI with proper argument parsing and tests."""
+    'task1_fastapi_todo': 'Build a FastAPI todo API in main.py (the FastAPI instance must be named `app`).\n- SQLite storage (a file DB in the current directory is fine).\n- JWT auth: POST /auth/signup and POST /auth/login, both take JSON {"username", "password"} and return {"access_token": ...}.\n  Signing up with an existing username returns 400. Bad login returns 401.\n- Todos, all requiring "Authorization: Bearer <token>" (missing/invalid token -> 401):\n  POST /todos/ (JSON title, optional description, optional completed), GET /todos/ (query: skip, limit, completed),\n  GET /todos/{id}, PUT /todos/{id}, DELETE /todos/{id}. Missing todo or another user\'s todo -> 404.\n- Each todo has: id, title, description, completed, created_at, owner_id.\n- requirements.txt with all dependencies. Write your own tests.' + COMMON,
+    'task2_debug_module': 'The 4-file Python module in the current directory (calculator.py, processor.py, models.py, utils.py)\nhas bugs, and test_module.py is failing. Fix the source files so all tests pass. Do not modify test_module.py.\nThe bugs include an off-by-one error, mutable default arguments, a timezone bug (datetimes must be timezone-aware UTC),\na threading race condition, and silently swallowed exceptions.' + COMMON,
+    'task3_refactor_script': 'messy_script.py (~300 lines) and its tests test_messy.py are in the current directory.\nRefactor it into 3 clean modules: parser.py (input parsing, public entry `parse`), processor.py (core logic, public\nentry `process`), formatter.py (output formatting, public entry `format`). Replace messy_script.py with a thin main.py\n(with a `main()` function) that uses them, then delete messy_script.py. Update test_messy.py to import from the new\nmodules and keep every one of its tests passing. No duplicate code; one responsibility per module.' + COMMON,
+    'task4_expression_evaluator': 'Write evaluator.py with evaluate(expression: str) -> float that handles:\n+, -, *, /, ^ (power, right-associative), parentheses, unary minus (-5, -(3+2)), functions max(a,b), min(a,b), abs(x),\nsqrt(x), pow(x,y), and arbitrary whitespace. Raise ValueError with a helpful message for: division by zero, unmatched\nparentheses, unknown tokens, invalid syntax, and empty input. Also write test_evaluator.py with thorough tests.\nDo not use eval().' + COMMON,
+    'task5_duplicate_finder': "Build a CLI in main.py that finds duplicate files: `python main.py FOLDER [--delete] [--dry-run]`.\n- Recursive traversal; duplicates by file content hash (not name). Empty files count as duplicates of each other.\n- Don't follow symlinks (and never loop on symlink cycles). Skip unreadable files gracefully (no crash).\n- Default is a dry run: just report. --delete removes all but one file per group; --dry-run explicitly shows what would be deleted.\n- Output: each group of duplicates with file paths and sizes. Exit code 0 on success.\n- Show progress for large folders (on stderr). Write tests." + COMMON,
 }
 
 
@@ -253,6 +189,9 @@ async def run_mike_task(task_text: str, task_name: str, run_id: str, base_dir: P
     # Run setup first
     setup_func = import_setup_function(SETUP_FUNCTIONS[task_name])
     setup_func(task_dir)
+    # Each run gets its own venv on PATH, as the task text says (it also sees Mike's packages, read-only).
+    from self_coding import DevSession, ToolExecutor
+    ToolExecutor(task_dir, DevSession("bench", "setup", task_dir))._project_venv_bin()
 
     runner = MikeRunner(task_dir)
     return await runner.run(task_text, task_name, run_id)
@@ -270,17 +209,24 @@ def run_hidden_tests(task_name: str, task_dir: Path) -> Dict[str, Any]:
         }
 
     # Use mike's venv python for tests
+    # The task's own .venv if Mike made one (it holds what he installed, and sees Mike's packages too).
+    # The benchmark's Python runs the tests (it has pytest-asyncio, see bench/requirements.txt); whatever the
+    # project installed into its own venv is added to the path so its code imports.
     mike_python = sys.executable
+    import glob
+    project_libs = [p for v in (".venv", "venv", "env") for p in glob.glob(str(task_dir / v / "lib" / "python*" / "site-packages"))
+                    + glob.glob(str(task_dir / v / "Lib" / "site-packages"))]
 
     # Run pytest programmatically - the test file imports from task_dir using sys.path
     # We need to add the task_dir to PYTHONPATH so the tests can import the project modules
     env = os.environ.copy()
-    env["PYTHONPATH"] = str(task_dir) + ":" + env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = os.pathsep.join([str(task_dir), *project_libs, env.get("PYTHONPATH", "")])
+    env["MIKE_BENCH_TASK_DIR"] = str(task_dir)        # the hidden tests check this folder
 
     result = subprocess.run([
         mike_python, "-m", "pytest",
         str(test_file),
-        "-rA", "--tb=short", "-p", "no:cacheprovider",
+        "-rA", "--tb=short", "-p", "no:cacheprovider", "-o", "asyncio_mode=auto",
         "--import-mode=importlib"
     ], capture_output=True, text=True, cwd=task_dir, timeout=120, env=env)
 
@@ -290,7 +236,8 @@ def run_hidden_tests(task_name: str, task_dir: Path) -> Dict[str, Any]:
     # Count passed/failed
     # Read pytest's own summary line ("3 failed, 5 passed, 1 error in 0.4s"): per-test lines vary with flags.
     import re
-    summary = output.strip().splitlines()[-1] if output.strip() else ""
+    summary = next((l for l in reversed(output.splitlines())
+                    if re.search(r"\b(passed|failed|errors?|skipped|no tests ran)\b.* in [\d.]+s", l)), "")
     def n(word):
         m = re.search(rf"(\d+) {word}", summary)
         return int(m.group(1)) if m else 0

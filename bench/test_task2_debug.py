@@ -4,11 +4,12 @@ import pytest
 import sys
 import threading
 import time
+import os
 from pathlib import Path
 
-task_dir = Path(__file__).parent / "task2_debug_module_run1"
-if not task_dir.exists():
-    task_dir = Path(__file__).parent / "task2_debug_module_run2"
+# The folder the task ran in (set by run_hidden_tests); a bench/task2_debug_module_run1 copy is the old layout.
+task_dir = Path(os.environ["MIKE_BENCH_TASK_DIR"]) if os.environ.get("MIKE_BENCH_TASK_DIR") \
+    else Path(__file__).parent / "task2_debug_module_run1"
 
 sys.path.insert(0, str(task_dir))
 

@@ -230,7 +230,8 @@ def run_command(command: str, cwd: str = "") -> str:
         # Mike's venv is on PATH only inside Mike's own folder: elsewhere (home included) a bare `pip install`
         # would install into Mike and once broke him. A project runs with its own .venv when it has one.
         mine = str(config.ROOT / ".venv" / config.VENV_BIN)
-        theirs = os.path.join(where, ".venv", config.VENV_BIN)
+        theirs = next((os.path.join(where, v, config.VENV_BIN) for v in (".venv", "venv", "env")
+                       if os.path.isdir(os.path.join(where, v, config.VENV_BIN))), os.path.join(where, ".venv", config.VENV_BIN))
         inside_mike = os.path.realpath(where).startswith(os.path.realpath(config.ROOT))
         parts = [q for q in _ENV["PATH"].split(os.pathsep) if q != mine]
         env = dict(_ENV, PATH=os.pathsep.join(([theirs] if os.path.isdir(theirs) else []) + ([mine] if inside_mike else []) + parts))
