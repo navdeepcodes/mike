@@ -32,6 +32,8 @@ import subprocess
 from brain import Brain
 from ears import Ears
 import voice
+import code_guard
+import code_sessions
 import projects
 import terminals
 import voiceprint
@@ -107,6 +109,7 @@ def save_setting(**kv):
 
 # Every user-facing setting: key -> (config attribute, type, restart brain when changed).
 SETTINGS_SPEC = {
+    "code_approval": ("CODE_APPROVAL", str, False),
     "user_name": ("USER_NAME", str, False),
     "model": ("MODEL", str, True),
     "effort": ("EFFORT", str, True),
@@ -207,6 +210,12 @@ class Mike:
         self.launched_hello = False
         self.backup = FallbackBrain(self.on_delta, self.on_tool, self.on_done, self.on_permission)
         self.active = self.brain              # whichever brain is handling the current request
+        self.brain.on_tool_result = self.backup.on_tool_result = self.on_tool_result
+        self.code_live = False                # the current request came from the Code tab
+        self.code_session = ""                # its saved session (data/code_sessions), reopened from History
+        self.code_session_path = ""
+        self.code_allow: set[str] = set()     # "Allow for this session" answers (tool kinds)
+        self.turn_images: list[str] = []
         self.claude_blocked_until = 0.0       # Claude Pro limit reached until this time
         self.turn_prompt = ""                 # the request as sent (with context), for retrying on the backup
         self.retried = False
@@ -229,6 +238,8 @@ class Mike:
             except Exception:
                 pass
         t = obj.get("type")
+        if self.code_live and self.code_session and t in code_sessions.RECORDED:
+            code_sessions.append(self.code_session, obj)
         if self.pets and (t in self.PET_EVENTS or t == "audio"):
             # The pet shows subtitles, not sound: strip the audio payload.
             msg = {"type": "speak", "text": obj.get("text", "")} if t == "audio" else obj
@@ -432,10 +443,31 @@ class Mike:
         if isinstance(inp.get("todos"), list):
             args["todos"] = [{"text": str(t.get("content") or t.get("text") or "")[:120], "status": t.get("status", "pending")}
                              for t in inp["todos"][:20] if isinstance(t, dict)]
-        await self.send({"type": "tool", "name": pretty, "detail": str(detail)[:200], "args": {k: v for k, v in args.items() if v}})
+        tid = str(getattr(self.active, "current_tool_id", "") or "")
+        await self.send({"type": "tool", "id": tid, "name": pretty, "detail": str(detail)[:200], "args": {k: v for k, v in args.items() if v}})
         log.info("tool %s: %s", pretty, str(detail)[:160])
         if pretty == "look":
             await self.send({"type": "flash", "what": "camera"})
+
+    async def on_tool_result(self, tool_id: str, name: str, output: str, error: bool):
+        """A step's result, so the Code tab can show what a command printed (and whether it failed)."""
+        out = str(output or "")
+        if len(out) > 8000:
+            out = out[:3000] + f"\n… {len(out) - 6000} characters not shown …\n" + out[-3000:]
+        await self.send({"type": "tool_result", "id": str(tool_id or ""), "name": name.replace("mcp__mike__", ""),
+                         "output": out, "error": bool(error)})
+
+    async def _snapshot_session(self, sid: str):
+        """After each coding turn: the project's changes and their diffs, kept with the session for review."""
+        loop = asyncio.get_running_loop()
+        try:
+            changes = await loop.run_in_executor(None, projects.changes, self.code_session_path)
+            diffs = {}
+            for c in changes[:40]:
+                diffs[c["file"]] = await loop.run_in_executor(None, projects.diff, c["file"], self.code_session_path)
+            code_sessions.snapshot(sid, changes, diffs)
+        except Exception:
+            log.exception("couldn't save the session's changes")
 
     async def on_done(self, info: dict):
         claude_failed = (self.active is self.brain and not info.get("interrupted") and self.turn_prompt
@@ -447,7 +479,7 @@ class Mike:
             self.splitter = SentenceSplitter()
             self.turn_reply = []
             self.active = self.backup
-            await self.backup.send(self.turn_prompt)
+            await self.backup.send(self.turn_prompt, self.turn_images)
             return
         if self.active is self.backup and self.backup.last_used and not info.get("error"):
             await self.send({"type": "log", "text": f"brain online · model {self.backup.last_used}"})
@@ -472,6 +504,8 @@ class Mike:
         self.turn_user, self.turn_reply = "", []
         self.offer_followup = not info.get("interrupted")
         await self.send({"type": "assistant_done", **{k: info.get(k) for k in ("cost", "duration_ms", "error", "interrupted")}})
+        if self.code_live and self.code_session:
+            asyncio.create_task(self._snapshot_session(self.code_session))
         if info.get("error") and not info.get("interrupted"):
             err = str(info["error"])
             if self.active is self.backup and ("No backup model" in err or "No model is set up" in err):
@@ -572,22 +606,27 @@ class Mike:
                         "up a dialog. Do it with the native tools instead (ui, press, set_text, menu, type_text, "
                         "press_key, media), opening the app with `open -a` first if needed. Only if it truly can't be "
                         "done that way, tell the user in one sentence that they can allow it once while at the Mac.")
-        # Just do the work. Only genuinely sensitive actions need a yes.
-        if not is_sensitive(tool, inp):
+        # Just do the work. Only genuinely sensitive actions need a yes, unless the Code tab is set to ask
+        # before every edit and command (like Claude Code), and you haven't allowed that kind for this session.
+        sensitive = is_sensitive(tool, inp)
+        kind = code_guard.tool_kind(tool)
+        if not code_guard.should_ask(tool, sensitive, self.code_live, config.CODE_APPROVAL, self.code_allow):
             return True
         summary = describe_action(tool, inp)
         cid = uuid.uuid4().hex[:8]
         fut = asyncio.get_running_loop().create_future()
-        self.pending_confirm = {"id": cid, "future": fut}
-        await self.send({"type": "confirm", "id": cid, "tool": tool, "summary": summary,
-                         "detail": json.dumps(inp, indent=1)[:1500]})
-        self.say(f"Quick check. Should I {summary}?")
+        self.pending_confirm = {"id": cid, "future": fut, "tool": kind, "sensitive": sensitive}
+        await self.send({"type": "confirm", "id": cid, "tool": tool, "summary": summary, "code": self.code_live,
+                         "sensitive": sensitive, "detail": json.dumps(inp, indent=1)[:4000]})
+        if not self.code_live:
+            self.say(f"Quick check. Should I {summary}?")
         await self.set_state("confirming")
         try:
-            ok = await asyncio.wait_for(fut, 90)
+            ok = await asyncio.wait_for(fut, 600 if self.code_live else 90)
         except asyncio.TimeoutError:
             ok = False
-            self.say("No answer, so I'll skip that.")
+            if not self.code_live:
+                self.say("No answer, so I'll skip that.")
         self.pending_confirm = None
         await self.send({"type": "confirm_done", "id": cid, "allowed": ok})
         await self.set_state("thinking" if self.brain.busy else "idle")
@@ -679,6 +718,7 @@ class Mike:
     async def on_utterance(self, text: str, mic: bool = False):
         log.info("heard: %s", text)
         self.coding_turn = False
+        self.code_live = False
         self.t_heard = time.time()      # for the "heard → first sound" timing in speech_worker
         self.heard_alt = (text, getattr(self.ears, "alt", "") if mic else "")
         self.voice_score = None
@@ -805,7 +845,8 @@ class Mike:
         changes = await loop.run_in_executor(None, projects.changes) if cur else []
         brain = "Free model" if self.use_backup() else (config.MODEL or "claude-haiku-5-5").replace("claude-", "").replace("-", " ").title()
         return {"type": "code_state", "project": cur, "projects": [{"name": p.name, "path": str(p)} for p in found[:40]],
-                "terminals": terminals.snapshot(), "changes": changes, "brain": brain}
+                "terminals": terminals.snapshot(), "changes": changes, "brain": brain,
+                "approval": config.CODE_APPROVAL, "session": self.code_session}
 
     async def send_code_state(self):
         await self.send(await self.code_state())
@@ -874,7 +915,7 @@ class Mike:
         if on:
             await self.send({"type": "hide"})
 
-    async def handle_command(self, command: str, allow_quit: bool = True):
+    async def handle_command(self, command: str, allow_quit: bool = True, images: list[str] | None = None):
         if STOP.match(command):
             await self.interrupt()
             return
@@ -936,7 +977,8 @@ class Mike:
         self.auto, self.round_tools, self.auto_done_flag = None, 0, False
         self.followup_until = 0
         await self.set_state("thinking")
-        await self.send({"type": "user", "text": command})
+        self.turn_images = list(images or [])
+        await self.send({"type": "user", "text": command, **({"images": len(self.turn_images)} if self.turn_images else {})})
         # After a break, start a fresh conversation: small context = fast and cheap. Memory
         # (facts + latest exchanges) is in the system prompt, so nothing important is lost.
         now = time.time()
@@ -957,10 +999,10 @@ class Mike:
         try:
             if self.use_backup():
                 self.active = self.backup
-                await self.backup.send(self.turn_prompt)
+                await self.backup.send(self.turn_prompt, self.turn_images)
                 return
             self.active = self.brain
-            await self.brain.send(self.turn_prompt)
+            await self.brain.send(self.turn_prompt, self.turn_images)
         except Exception as e:
             log.exception("brain send failed")
             self.say("I couldn't reach Claude Code.")
@@ -1087,6 +1129,8 @@ class Mike:
         if key not in SETTINGS_SPEC:
             return
         attr, typ, restart = SETTINGS_SPEC[key]
+        if key == "code_approval" and value not in code_guard.MODES:
+            return
         try:
             value = typ(value)
         except (TypeError, ValueError):
@@ -1096,6 +1140,8 @@ class Mike:
         setattr(config, attr, value)
         save_setting(**{key: value})
         log.info("setting %s = %r", key, value)
+        if key == "code_approval":
+            await self.send_code_state()
         if restart:
             await self.brain.stop()          # restarts on the next request, same conversation
         await self.send({"type": "settings", "values": current_settings()})
@@ -1318,6 +1364,11 @@ def describe_action(tool: str, inp: dict) -> str:
         return f"edit the notebook {base(inp.get('notebook_path'))}"
     if tool == "Browser":
         return str(inp.get("summary") or "do that on the website")
+    kind = tool.replace("mcp__mike__", "")
+    if kind == "terminal_start":
+        return f"start {str(inp.get('command') or 'a terminal')[:80]} in a terminal"
+    if kind == "terminal_send":
+        return f"type {str(inp.get('text', ''))[:80]!r} into the terminal"
     pretty = tool.replace("mcp__", "").replace("__", " ").replace("_", " ")
     return f"use {pretty}"
 
@@ -1361,6 +1412,19 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+
+
+@app.middleware("http")
+async def only_mikes_own_page(request, call_next):
+    """Refuse requests from other websites in your browser (and DNS-rebinding tricks): Mike runs commands."""
+    if not code_guard.request_ok(request.headers.get("origin"), request.headers.get("host", ""), config.PORT, config.HOST):
+        log.warning("refused a request from %s", request.headers.get("origin") or request.headers.get("host"))
+        return PlainTextResponse("Forbidden", status_code=403)
+    return await call_next(request)
+
+
+def ws_allowed(ws: WebSocket) -> bool:
+    return code_guard.request_ok(ws.headers.get("origin"), ws.headers.get("host", ""), config.PORT, config.HOST)
 
 
 @app.middleware("http")
@@ -1540,6 +1604,10 @@ async def api_native(request: Request):
 
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):
+    if not ws_allowed(ws):
+        log.warning("refused a websocket from %s", ws.headers.get("origin"))
+        await ws.close(code=1008)
+        return
     await ws.accept()
     if mike.ws:
         try:
@@ -1571,16 +1639,24 @@ async def ws_endpoint(ws: WebSocket):
                 text = data.get("text", "").strip()
                 if not text:
                     continue
-                mike.code_turn = mike.coding_turn = data.get("source") == "code"      # typed in the Code tab: he is working on the open project
+                mike.code_turn = mike.coding_turn = mike.code_live = data.get("source") == "code"   # typed in the Code tab: he is working on the open project
+                images = code_guard.clean_images(data.get("images"))
+                if mike.code_live:
+                    cur = projects.info()
+                    if not mike.code_session or mike.code_session_path != cur.get("path", ""):
+                        mike.code_session, mike.code_session_path = code_sessions.new(cur), cur.get("path", "")
+                        mike.code_allow.clear()
                 if mike.pending_confirm:
                     await mike.on_utterance(text)
                 else:
                     if mike.state in ("thinking", "speaking"):
                         await mike.interrupt()
-                    await mike.handle_command(text)
+                    await mike.handle_command(text, images=images)
             elif t == "drained":
                 await mike.on_drained(int(data.get("gen", -1)))
             elif t == "approve" and mike.pending_confirm and mike.pending_confirm["id"] == data.get("id"):
+                if data.get("allow") == "session" and not mike.pending_confirm.get("sensitive"):
+                    mike.code_allow.add(mike.pending_confirm.get("tool", ""))     # risky actions still ask every time
                 if not mike.pending_confirm["future"].done():
                     mike.pending_confirm["future"].set_result(bool(data.get("allow")))
             elif t == "interrupt":
@@ -1604,6 +1680,17 @@ async def ws_endpoint(ws: WebSocket):
             elif t == "memory_get":
                 await mike.send(mike.memory_payload())
             elif t == "code_get":
+                await mike.send_code_state()
+            elif t == "code_sessions":
+                path = "" if data.get("all") else (projects.info().get("path") or "")
+                await mike.send({"type": "code_sessions", "sessions": await asyncio.get_running_loop().run_in_executor(
+                    None, code_sessions.listing, path)})
+            elif t == "code_session_get":
+                sid = str(data.get("id", ""))
+                await mike.send({"type": "code_session", "id": sid, "events": await asyncio.get_running_loop().run_in_executor(
+                    None, code_sessions.load, sid)})
+            elif t == "code_session_new":
+                mike.code_session, mike.code_allow = "", set()
                 await mike.send_code_state()
             elif t == "window":
                 # The Mike window is in front and focused: the pet keeps quiet (no bubbles, hidden) so they don't double up.
@@ -1711,6 +1798,9 @@ async def ws_endpoint(ws: WebSocket):
 @app.websocket("/ws/pet")
 async def ws_pet(ws: WebSocket):
     """The desktop pet: mirrors Mike's state and can wake, stop, or answer yes/no."""
+    if not ws_allowed(ws):
+        await ws.close(code=1008)
+        return
     await ws.accept()
     mike.pets.add(ws)
     await ws.send_text(json.dumps({

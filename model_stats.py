@@ -77,5 +77,18 @@ def limit(lane: str) -> int | None:
     return _load().get(lane, {}).get("limit")
 
 
+def set_flag(lane: str, name: str, value: bool):
+    """Something learned about a model, e.g. vision=False after it rejected a pasted image."""
+    with _lock:
+        s = _load().setdefault(lane, {"ok": 0, "bad": 0})
+        if s.get(name) != value:
+            s[name] = value
+            _save()
+
+
+def flag(lane: str, name: str) -> bool | None:
+    return _load().get(lane, {}).get(name)
+
+
 def summary() -> dict:
     return {k: dict(v) for k, v in _load().items()}

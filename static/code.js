@@ -12,6 +12,7 @@ const C = {
   panelOpen: pref.get("panel", false), termOpen: pref.get("term", false), termH: pref.get("termH", 240), plan: false,
   turn: null, working: false, workStart: 0, workTimer: null, diff: null, view: null, openDirs: new Set(), stick: true,
   pop: null, popItems: [], popIdx: 0, refresh: null, toastT: null, steps: 0,
+  stepMap: {}, atts: [], pendingThumbs: [], approval: "ask", sessions: null, past: null, liveNodes: null, queued: [],
 };
 
 const ICON = {
@@ -69,7 +70,12 @@ function renderBar() {
   const pb = $("cxPanelBadge"); pb.textContent = C.changes.length; pb.classList.toggle("hidden", !C.changes.length);
   $("cxTermBtn").classList.toggle("on", C.termOpen); $("cxPanelBtn").classList.toggle("on", C.panelOpen);
   $("cxBrain").textContent = C.brain;
-  $("cxHint").textContent = p ? p.path.replace(/^\/Users\/[^/]+/, "~") : "";
+  const ask = $("cxAsk"); ask.classList.toggle("on", C.approval === "ask"); ask.setAttribute("aria-pressed", String(C.approval === "ask"));
+  ask.title = C.approval === "ask" ? "Mike asks before each edit and command (click to only ask for risky ones)" : "Mike only asks before risky actions (click to ask before every edit and command)";
+  const where = p ? p.path.replace(/^\/Users\/[^/]+/, "~") : "";
+  const parts = where.split("/");
+  $("cxHint").textContent = parts.length > 4 ? "…/" + parts.slice(-2).join("/") : where;   // short; the full path is on hover
+  $("cxHint").title = where;
   renderEmpty();
 }
 function runCmd(k, v) { setTerm(true); api.send({ type: "term_start", name: k, command: v, cwd: C.project?.path || "" }); }
@@ -131,7 +137,7 @@ function feedAdd(node) {
 }
 function working() {
   let n = $("cxWorking");
-  if (!n) { n = h("div", "cx-working"); n.id = "cxWorking"; n.append(h("span", "cx-dots"), h("span", "t", "Working…"), h("small", "")); }
+  if (!n) { n = h("div", "cx-working"); n.id = "cxWorking"; const m = h("span", "meter"); m.setAttribute("aria-hidden", "true"); m.append(h("i"), h("i"), h("i")); n.append(m, h("span", "t", "Working…"), h("small", "")); }
   return n;
 }
 function took(ms) { const s = Math.round(ms / 1000); return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, "0")}s`; }
@@ -171,21 +177,64 @@ function stepNode(m) {
   const isEdit = ic === "edit";
   const file = (a.file || "").split("/").pop();
   const label = isEdit || ic === "file" ? file : (a.command || m.detail || a.pattern || "").slice(0, 120);
-  const body = isEdit ? (a.old || a.new ? diffBlock(a.old, a.new) : (a.content ? (() => { const d = h("div", "cx-diff"); a.content.split("\n").slice(0, 16).forEach((l) => d.append(h("div", "ln add", "+ " + l))); return d; })() : null))
-    : (a.command && a.command.length > 70 ? h("pre", "cx-pre", a.command) : null);
-  const row = h("div", "cx-step");
-  const head = h("button", "cx-step-head"); head.type = "button";
+  const diff = isEdit ? (a.old || a.new ? diffBlock(a.old, a.new) : (a.content ? (() => { const d = h("div", "cx-diff"); a.content.split("\n").slice(0, 16).forEach((l) => d.append(h("div", "ln add", "+ " + l))); return d; })() : null)) : null;
+  const row = h("div", "cx-step running");
+  const head = h("button", "cx-step-head"); head.type = "button"; head.setAttribute("aria-expanded", "false");
   head.append(icon(ic, "ic"), h("b", "", verb), h("code", "", label));
   if (isEdit && (a.old != null || a.new != null || a.content != null)) {
     const n = a.content != null ? { add: a.content.split("\n").length, del: 0 } : diffCounts(a.old, a.new);
     const c = h("span", "cx-cnt"); c.append(h("em", "add", `+${n.add}`), h("em", "del", `−${n.del}`)); head.append(c);
   }
-  if (body) { head.append(icon("chev", "chev")); head.onclick = () => row.classList.toggle("open"); } else head.classList.add("flat");
-  row.append(head);
-  if (body) { const wrap = h("div", "cx-step-body"); wrap.append(body); row.append(wrap); }
+  head.append(h("i", "cx-st"), icon("chev", "chev"));
+  head.onclick = () => { if (!row.querySelector(".cx-step-body").children.length) return; const on = row.classList.toggle("open"); head.setAttribute("aria-expanded", String(on)); };
+  const wrap = h("div", "cx-step-body");
+  if (diff) wrap.append(diff);
+  if (a.command) { wrap.append(h("div", "cx-outhead", "Command")); wrap.append(h("pre", "cx-pre", a.command)); }
+  row.append(head, wrap);
+  row.classList.toggle("bare", !wrap.children.length);
   if (a.file) row.title = a.file;
+  if (m.id) { row.dataset.id = m.id; C.stepMap[m.id] = row; }
   return row;
 }
+// A step's result: what the command printed, or the error. Errors open the step so you see them.
+function stepResult(m) {
+  let row = m.id ? C.stepMap[m.id] : null;
+  if (!row) row = [...$("cxFeed").querySelectorAll(".cx-step.running")].pop();
+  if (!row) return;
+  row.classList.remove("running", "bare"); row.classList.add(m.error ? "err" : "ok");
+  const out = String(m.output || "").replace(/\s+$/, "");
+  if (!out) return;
+  const wrap = row.querySelector(".cx-step-body");
+  wrap.querySelector(".cx-result")?.remove();
+  const box = h("div", "cx-result");
+  box.append(h("div", "cx-outhead", m.error ? "Error" : "Output"), h("pre", "cx-pre out" + (m.error ? " bad" : ""), out.length > 12000 ? out.slice(0, 12000) + "\n…" : out));
+  wrap.append(box);
+  if (m.error && !row.classList.contains("open")) { row.classList.add("open"); row.querySelector(".cx-step-head").setAttribute("aria-expanded", "true"); }
+}
+
+// ---------------------------------------------------------------- approvals (Allow / Deny)
+function confirmCard(m) {
+  const card = h("div", "cx-confirm" + (m.sensitive ? " risky" : "")); card.dataset.id = m.id;
+  card.append(h("div", "q", `Allow Mike to ${m.summary}?`));
+  if (m.detail) { const d = h("details", ""); d.append(h("summary", "", "Details"), h("pre", "cx-pre", m.detail)); card.append(d); }
+  const acts = h("div", "acts");
+  const mk = (txt, cls, allow) => { const b = h("button", "btn " + cls, txt); b.type = "button"; b.onclick = () => { acts.querySelectorAll("button").forEach((x) => (x.disabled = true)); api.send({ type: "approve", id: m.id, allow }); }; return b; };
+  const allow = mk("Allow", "primary", true);
+  acts.append(mk("Deny", "", false));
+  if (!m.sensitive && !C.past) acts.append(mk("Allow for this session", "", "session"));
+  acts.append(allow);
+  if (C.past) acts.querySelectorAll("button").forEach((x) => (x.disabled = true));
+  card.append(acts);
+  feedAdd(card);
+  if (!C.past) setTimeout(() => allow.focus(), 30);
+}
+function confirmDone(m) {
+  const card = $("cxFeed").querySelector(`.cx-confirm[data-id="${CSS.escape(m.id || "")}"]`);
+  if (!card) return;
+  card.classList.add("done", m.allowed ? "allowed" : "denied");
+  card.querySelector(".acts")?.replaceChildren(h("span", "verdict", m.allowed ? "Allowed" : "Denied"));
+}
+
 function todoNode(todos) {
   const box = h("div", "cx-todos");
   box.append(h("div", "cx-todos-h", "Plan"));
@@ -198,7 +247,22 @@ function todoNode(todos) {
 }
 function feedEvent(m) {
   switch (m.type) {
-    case "user": C.turn = null; feedAdd(h("div", "cx-user", m.text)); break;
+    case "user": {
+      C.turn = null;
+      const u = h("div", "cx-user", m.text);
+      if (m.images) {
+        const th = h("div", "cx-thumbs");
+        const urls = C.pendingThumbs.splice(0);
+        if (urls.length) urls.forEach((url) => { const i = h("img", ""); i.src = url; i.alt = "Pasted image"; th.append(i); });
+        else th.append(h("span", "cx-imgnote", `${m.images} image${m.images > 1 ? "s" : ""}`));
+        u.append(th);
+      }
+      feedAdd(u); break;
+    }
+    case "tool_result": stepResult(m); break;
+    case "confirm": confirmCard(m); break;
+    case "confirm_done": confirmDone(m); break;
+    case "snapshot": if (C.past) C.past.snapshot = m; break;
     case "assistant_delta": {
       if (!C.turn) { C.turn = h("div", "cx-say"); C.turn._t = ""; feedAdd(C.turn); }
       C.turn._t += m.text;
@@ -212,7 +276,7 @@ function feedEvent(m) {
       if (m.error) feedAdd(h("div", "cx-note err", "Something went wrong."));
       else if (m.interrupted) feedAdd(h("div", "cx-note", "Stopped."));
       else if (m.duration_ms >= 1000) feedAdd(h("div", "cx-took", `Worked for ${took(m.duration_ms)}`));
-      clearTimeout(C.refresh); C.refresh = setTimeout(() => api.send({ type: "code_get" }), 500);
+      if (!C.past) { clearTimeout(C.refresh); C.refresh = setTimeout(() => api.send({ type: "code_get" }), 500); }
       break;
     case "tool": {
       if (m.name === "ToolSearch") break;
@@ -232,26 +296,34 @@ function feedEvent(m) {
 function setPanel(on) { C.panelOpen = on; pref.set("panel", on); $("cxPanel").classList.toggle("hidden", !on); renderBar(); if (on) refreshPanel(); }
 function refreshPanel() {
   document.querySelectorAll(".cx-panel-tabs button").forEach((b) => b.classList.toggle("on", b.dataset.tab === C.tab));
-  $("cxChgCount").textContent = C.changes.length || "";
-  $("cxCommit").classList.toggle("hidden", !(C.tab === "changes" && C.changes.length && !C.diff));
+  $("cxChgCount").textContent = shownChanges().length || "";
+  $("cxCommit").classList.toggle("hidden", !(C.tab === "changes" && C.changes.length && !C.diff && !C.past));
   const body = $("cxPanelBody"); body.replaceChildren();
-  if (!C.project) { body.append(h("div", "cx-p-empty", "Choose a project first.")); return; }
+  if (C.tab === "history") return renderHistory(body);
+  if (!C.project && !C.past) { body.append(h("div", "cx-p-empty", "Choose a project first.")); return; }
   if (C.diff) return renderDiff(body);
   if (C.view) return renderFileView(body);
   if (C.tab === "changes") return renderChanges(body);
   return renderFiles(body);
 }
+function shownChanges() { return C.past ? (C.past.snapshot?.changes || []) : C.changes; }
 function renderChanges(body) {
-  if (!C.changes.length) { body.append(h("div", "cx-p-empty", "No changes yet. Everything Mike edits shows up here.")); return; }
-  const add = C.changes.reduce((n, c) => n + c.add, 0), del = C.changes.reduce((n, c) => n + c.del, 0);
-  const sum = h("div", "cx-sum"); sum.append(h("span", "", `${C.changes.length} file${C.changes.length > 1 ? "s" : ""}`), h("span", "add", `+${add}`), h("span", "del", `−${del}`));
+  const changes = shownChanges();
+  if (C.past) body.append(h("div", "cx-p-note", C.past.snapshot ? "Changes as of the end of this session" : "This session left no saved changes."));
+  if (!changes.length) {
+    if (C.past) return; body.append(h("div", "cx-p-empty", "No changes yet. Everything Mike edits shows up here.")); return; }
+  const add = changes.reduce((n, c) => n + c.add, 0), del = changes.reduce((n, c) => n + c.del, 0);
+  const sum = h("div", "cx-sum"); sum.append(h("span", "", `${changes.length} file${changes.length > 1 ? "s" : ""}`), h("span", "add", `+${add}`), h("span", "del", `−${del}`));
   body.append(sum);
-  C.changes.forEach((c) => {
+  changes.forEach((c) => {
     const r = h("button", "cx-file"); r.type = "button";
     r.append(h("i", "st " + c.status, c.status), h("span", "name", c.file.split("/").pop()), h("small", "", c.file.includes("/") ? c.file.replace(/\/[^/]+$/, "") : ""),
              h("span", "cnt", ""));
     const cnt = r.querySelector(".cnt"); cnt.append(h("em", "add", `+${c.add}`), h("em", "del", `−${c.del}`));
-    r.onclick = () => { C.diff = { file: c.file, text: null }; refreshPanel(); api.send({ type: "diff_get", file: c.file }); };
+    r.onclick = () => {
+      if (C.past) { C.diff = { file: c.file, text: C.past.snapshot?.diffs?.[c.file] ?? "" }; refreshPanel(); return; }
+      C.diff = { file: c.file, text: null }; refreshPanel(); api.send({ type: "diff_get", file: c.file });
+    };
     body.append(r);
   });
 }
@@ -301,6 +373,84 @@ function renderFiles(body) {
   draw(tree, "", 0);
 }
 
+// ---------------------------------------------------------------- past sessions
+function when(t) {
+  const d = new Date(t * 1000), now = new Date();
+  const time = d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  if (d.toDateString() === now.toDateString()) return `Today ${time}`;
+  const y = new Date(now); y.setDate(now.getDate() - 1);
+  if (d.toDateString() === y.toDateString()) return `Yesterday ${time}`;
+  return d.toLocaleDateString([], { day: "numeric", month: "short" }) + " " + time;
+}
+function renderHistory(body) {
+  const top = h("div", "cx-hist-top");
+  const nw = h("button", "cx-chip", "New session"); nw.type = "button"; nw.title = "Start a fresh coding session";
+  nw.onclick = () => { exitPast(); api.send({ type: "code_session_new" }); const f = $("cxFeed"); [...f.children].forEach((n) => n.id !== "cxEmpty" && n.remove()); renderEmpty(); toast("New session started."); };
+  top.append(h("span", "", C.project ? `Sessions in ${C.project.name}` : "All sessions"), nw);
+  body.append(top);
+  if (C.sessions == null) { body.append(h("div", "cx-p-empty", "Loading…")); api.send({ type: "code_sessions", all: !C.project }); return; }
+  if (!C.sessions.length) { body.append(h("div", "cx-p-empty", "No past sessions yet. Everything you do here is saved so you can come back to it.")); return; }
+  C.sessions.forEach((x) => {
+    const r = h("button", "cx-sess" + (C.past?.id === x.id ? " on" : "")); r.type = "button";
+    r.append(h("b", "", x.first || "(no request)"));
+    const meta = h("small", ""); meta.textContent = `${when(x.updated || x.t)} · ${x.turns} request${x.turns > 1 ? "s" : ""}` + (x.changed ? ` · ${x.changed} file${x.changed > 1 ? "s" : ""} changed` : "") + (C.project ? "" : ` · ${x.project}`);
+    r.append(meta);
+    r.onclick = () => { r.classList.add("loading"); api.send({ type: "code_session_get", id: x.id }); };
+    body.append(r);
+  });
+}
+function enterPast(id, events) {
+  const f = $("cxFeed");
+  if (!C.past) { C.liveNodes = [...f.children].filter((n) => n.id !== "cxEmpty"); C.liveNodes.forEach((n) => n.remove()); C.liveTurn = C.turn; }
+  else [...f.children].forEach((n) => n.id !== "cxEmpty" && n.remove());
+  C.past = { id, snapshot: null }; C.turn = null;
+  const head = events.find((e) => e.type === "session");
+  events.forEach((e) => { if (e.type !== "session") feedEvent(e); });
+  C.turn = null;
+  $("cxPastText").textContent = `Viewing a past session${head ? " · " + when(head.t) : ""}${head?.project ? " · " + head.project : ""}`;
+  $("cxPast").classList.remove("hidden"); $("view-code").classList.add("past");
+  f.scrollTop = 0; C.diff = null; renderEmpty(); refreshPanel();
+}
+function exitPast() {
+  if (!C.past) return;
+  const f = $("cxFeed");
+  [...f.children].forEach((n) => n.id !== "cxEmpty" && n.remove());
+  (C.liveNodes || []).forEach((n) => f.append(n));
+  C.past = null; C.liveNodes = null; C.turn = C.liveTurn || null; C.diff = null;
+  $("cxPast").classList.add("hidden"); $("view-code").classList.remove("past");
+  const q = C.queued.splice(0); q.forEach(feedEvent);
+  renderEmpty(); f.scrollTop = f.scrollHeight; refreshPanel();
+}
+
+// ---------------------------------------------------------------- pasted images
+const MAX_ATTS = 4;
+function shrink(file) {
+  // Re-encode as JPEG, at most 1600 px: small enough to send, big enough to read text in a screenshot.
+  return createImageBitmap(file).then((bmp) => {
+    const k = Math.min(1, 1600 / Math.max(bmp.width, bmp.height));
+    const c = document.createElement("canvas"); c.width = Math.round(bmp.width * k); c.height = Math.round(bmp.height * k);
+    c.getContext("2d").drawImage(bmp, 0, 0, c.width, c.height);
+    return c.toDataURL("image/jpeg", 0.85);
+  });
+}
+async function addImages(files) {
+  for (const f of files) {
+    if (!f || !f.type.startsWith("image/")) continue;
+    if (C.atts.length >= MAX_ATTS) { toast(`Up to ${MAX_ATTS} images at a time.`, true); break; }
+    try { C.atts.push(await shrink(f)); } catch { toast("Couldn't read that image.", true); }
+  }
+  renderAtts();
+}
+function renderAtts() {
+  const box = $("cxAtts"); box.replaceChildren();
+  C.atts.forEach((url, i) => {
+    const t = h("div", "cx-att"); const im = h("img", ""); im.src = url; im.alt = `Attached image ${i + 1}`;
+    const x = h("button", "x", "×"); x.type = "button"; x.title = "Remove"; x.onclick = () => { C.atts.splice(i, 1); renderAtts(); };
+    t.append(im, x); box.append(t);
+  });
+  box.classList.toggle("hidden", !C.atts.length);
+}
+
 // ---------------------------------------------------------------- terminal drawer
 function setTerm(on) {
   C.termOpen = on; pref.set("term", on);
@@ -329,11 +479,16 @@ function renderTerm() {
 
 // ---------------------------------------------------------------- composer
 function submit(text) {
-  text = text.trim(); if (!text) return;
+  text = text.trim();
+  if (!text && C.atts.length) text = "Take a look at this image.";
+  if (!text) return;
+  exitPast();
   closePopover();
   if (text.startsWith("/")) { const c = SLASH.find((s) => s.cmd === text.split(/\s/)[0]); if (c) { slash(c, text.slice(c.cmd.length).trim()); return; } }
   if (!C.project) { toast("Choose or create a project first.", true); openProjectMenu(); return; }
-  api.ask((C.plan ? "Plan first: outline what you'd change in a few sentences and wait for my OK before touching any files. " : "") + text);
+  const images = C.atts.map((u) => u.split(",")[1]);
+  C.pendingThumbs = C.atts.slice(); C.atts = []; renderAtts();
+  api.ask((C.plan ? "Plan first: outline what you'd change in a few sentences and wait for my OK before touching any files. " : "") + text, images);
   C.stick = true;
 }
 function slash(c, rest) {
@@ -403,6 +558,18 @@ export const Code = {
     $("cxPanelBtn").onclick = () => setPanel(!C.panelOpen);
     $("cxTClose").onclick = () => setTerm(false);
     $("cxPlan").onclick = () => setPlan(!C.plan);
+    $("cxAsk").onclick = () => api.send({ type: "set", key: "code_approval", value: C.approval === "ask" ? "risky" : "ask" });
+    $("cxHistBtn").onclick = () => { C.tab = "history"; C.sessions = null; C.diff = C.view = null; setPanel(true); };
+    $("cxPastBack").onclick = exitPast;
+    $("cxAttach").onclick = () => $("cxFile").click();
+    $("cxFile").onchange = (e) => { addImages([...e.target.files]); e.target.value = ""; };
+    $("cxInput").addEventListener("paste", (e) => {
+      const files = [...(e.clipboardData?.items || [])].filter((i) => i.kind === "file" && i.type.startsWith("image/")).map((i) => i.getAsFile());
+      if (files.length) { e.preventDefault(); addImages(files); }
+    });
+    $("cxForm").addEventListener("dragover", (e) => { if ([...e.dataTransfer.items].some((i) => i.type.startsWith("image/"))) { e.preventDefault(); $("cxForm").classList.add("drop"); } });
+    $("cxForm").addEventListener("dragleave", () => $("cxForm").classList.remove("drop"));
+    $("cxForm").addEventListener("drop", (e) => { $("cxForm").classList.remove("drop"); const f = [...e.dataTransfer.files].filter((x) => x.type.startsWith("image/")); if (f.length) { e.preventDefault(); addImages(f); } });
     $("cxStop").onclick = () => api.stop();
     $("cxForm").onsubmit = (e) => { e.preventDefault(); const t = $("cxInput"); const v = t.value; if (v.trim() && !(C.popItems.length && C.pop && v.startsWith("/") && !SLASH.find((s) => s.cmd === v.trim()))) { t.value = ""; grow(); submit(v); } };
     $("cxInput").oninput = onInput;
@@ -416,7 +583,7 @@ export const Code = {
       if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); $("cxForm").requestSubmit(); }
     };
     $("cxInput").onblur = () => setTimeout(closePopover, 120);
-    document.querySelectorAll(".cx-panel-tabs button").forEach((b) => (b.onclick = () => { C.tab = b.dataset.tab; C.diff = C.view = null; if (C.tab === "files") api.send({ type: "files_get" }); refreshPanel(); }));
+    document.querySelectorAll(".cx-panel-tabs button").forEach((b) => (b.onclick = () => { C.tab = b.dataset.tab; C.diff = C.view = null; if (C.tab === "files") api.send({ type: "files_get" }); if (C.tab === "history") C.sessions = null; refreshPanel(); }));
     $("cxCommit").onsubmit = (e) => { e.preventDefault(); const m = $("cxCommitMsg"); if (m.value.trim()) { api.send({ type: "git_commit", message: m.value.trim() }); m.value = ""; } };
     $("cxTForm").onsubmit = (e) => { e.preventDefault(); const i = $("cxTInput"); if (C.active) { api.send({ type: "term_send", name: C.active, text: i.value, enter: true }); i.value = ""; } };
     $("cxTCtrlC").onclick = () => C.active && api.send({ type: "term_key", name: C.active, key: "ctrl-c" });
@@ -450,11 +617,13 @@ export const Code = {
     setTerm(C.termOpen); setPanel(C.panelOpen); renderBar(); renderTabs();
   },
   opened() { api.send({ type: "code_get" }); },
-  event(m) { feedEvent(m); },
+  event(m) { if (C.past) C.queued.push(m); else feedEvent(m); },
+  confirm(m) { if (C.past) exitPast(); feedEvent(m); },
   handle(m) {
     switch (m.type) {
       case "code_state":
         C.project = m.project && m.project.name ? m.project : null; C.projects = m.projects || []; C.changes = m.changes || []; C.brain = m.brain || "";
+        C.approval = m.approval || "ask";
         C.terms = Object.fromEntries((m.terminals || []).map((t) => [t.name, t]));
         renderBar(); renderTabs(); renderTerm(); if (C.panelOpen) refreshPanel();
         break;
@@ -463,6 +632,8 @@ export const Code = {
       case "diff": if (C.diff && C.diff.file === m.file) { C.diff.text = m.text; refreshPanel(); } break;
       case "file": if (C.view && C.view.file === m.file) { C.view.text = m.text; refreshPanel(); } break;
       case "code_toast": toast(m.text, m.error); break;
+      case "code_sessions": C.sessions = m.sessions || []; if (C.panelOpen && C.tab === "history") refreshPanel(); break;
+      case "code_session": enterPast(m.id, m.events || []); break;
     }
   },
   busy(on) {

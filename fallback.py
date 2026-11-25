@@ -573,6 +573,7 @@ _LIMIT_PATTERNS = [
     r"maximum number of tokens allowed \((\d+)\)",                        # Gemini
     r"context (?:length|window)[^0-9]{0,40}(\d{3,7})",                     # others that name a number
 ]
+_NO_IMAGES = re.compile(r"image|vision|multimodal|image_url|content.{0,20}(type|array|list)|'array' not in 'string'", re.I)
 _TOO_BIG = re.compile(r"\b413\b|too large|too long|context.length|context.window|too many (?:input )?tokens|reduce the length", re.I)
 
 
@@ -604,6 +605,10 @@ def _reply_budget(lane: str) -> int:
     model's limit is known the answer gets a quarter of it; unknown: the usual 4000."""
     cap = model_stats.limit(lane)
     return max(800, min(4000, cap // 4)) if cap else 4000
+
+
+# A 32x32 solid red JPEG. A model that says "red" can see images; one that guesses can't (and would invent answers).
+VISION_PROBE = "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQFxQYGBcUFhYaHSUfGhsjHBYWICwgIyYnKSopGR8tMC0oMCUoKSj/2wBDAQcHBwoIChMKChMoGhYaKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCj/wAARCAAgACADASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwDz+iiivmD9yCiiigAooooAKKKKAP/Z"
 
 
 def _soonest_free(failed_until: dict, lanes: list[tuple]) -> float | None:
@@ -645,7 +650,9 @@ class FallbackBrain:
         self._lat: dict[str, float] = {}      # how long each model took to answer its check (seconds)
         self.dev_until = 0.0
         self._weak: set[str] = set()           # models that struggled on the current request
-        self._can_escalate = False                   # programming mode (dev tools + rules) stays on this long after a coding request
+        self._can_escalate = False
+        self.on_tool_result = None             # set by the server: each step's output, for the Code tab
+        self.current_tool_id = ""                   # programming mode (dev tools + rules) stays on this long after a coding request
 
     # ---- providers --------------------------------------------------------
     def available(self) -> list[dict]:
@@ -757,9 +764,10 @@ class FallbackBrain:
         if self.task and not self.task.done():
             self.task.cancel()
 
-    async def send(self, text: str):
+    async def send(self, text: str, images: list[str] | None = None):
+        """A user turn; images are base64 JPEGs pasted into the Code tab (sent to models that can see)."""
         self.busy = True
-        self.history.append({"role": "user", "content": text})
+        self.history.append({"role": "user", "content": text, **({"images": list(images)} if images else {})})
         self.task = asyncio.create_task(self._turn())
 
     async def _turn(self):
@@ -825,13 +833,19 @@ class FallbackBrain:
             waited, seen_len = 0.0, len(self.history)
             while True:
                 escalated = False
+                if self._has_images() and all(model_stats.flag(f"{q['id']}/{n}", "vision") is False for q, n in lanes):
+                    self._drop_images()                                # nobody here can see them: carry on in words
                 for p, model in self._order(lanes):
                     if self.failed_until.get(p["id"], 0) > time.time() or self.failed_until.get(f"{p['id']}/{model}", 0) > time.time():
                         continue
                     here = f"{p['id']}/{model}"
+                    if self._has_images() and not await self._can_see(client, p, model):
+                        continue                                       # can't see images: never send it screenshots
                     self._can_escalate = any(_cap(q, n) > _cap(p, model) for q, n in lanes if f"{q['id']}/{n}" not in self._weak | {here})
                     try:
                         text = await self._loop(client, p, model, system)
+                        if self._has_images():
+                            model_stats.set_flag(here, "vision", True)
                         self.last_used = f"{p['name']} · {model}"
                         log.info("backup answered with %s", self.last_used)
                         return text
@@ -843,6 +857,9 @@ class FallbackBrain:
                         msg = str(e)
                         log.info("%s %s unavailable (%s); trying the next one", p["name"], model, msg[:90])
                         last_err = e
+                        if self._has_images() and _NO_IMAGES.search(msg) and "429" not in msg:
+                            model_stats.set_flag(here, "vision", False)     # learned: this model can't take images
+                            continue
                         lim = _limit_from_error(msg, getattr(self, "_last_sent", 0))
                         if lim:
                             model_stats.set_limit(here, lim)
@@ -1106,6 +1123,7 @@ class FallbackBrain:
                 elif per_tool[c["name"]] > (30 if dev else 8):
                     result = "That's too many tries with this tool. Stop and tell the user honestly where things stand."
                 else:
+                    self.current_tool_id = c["id"] or f"call_{i}"
                     result = await self._call(c["name"], c["args"])
                     seen[sig] = result
                     if c["name"] in ("edit_file", "write_file", "terminal_send", "terminal_start", "terminal_interrupt", "terminal_stop"):
@@ -1113,11 +1131,51 @@ class FallbackBrain:
                 self.history.append({"role": "tool", "tool_call_id": c["id"] or f"call_{i}", "content": result[:3000]})
                 ok = model_stats.step_ok(result)
                 model_stats.record(lane, ok)
+                if self.on_tool_result:
+                    await self.on_tool_result(c["id"] or f"call_{i}", c["name"], result, not ok)
                 streak = 0 if ok else streak + 1
             if dev and streak >= ESCALATE_AFTER and self._can_escalate:
                 log.info("%s failed %d steps in a row; moving the task to a more capable model", lane, streak)
                 raise _Escalate(lane)
         return said
+
+    def _drop_images(self):
+        last = next((m for m in reversed(self.history) if m["role"] == "user" and not m.get("nudge")), None)
+        if last and last.get("images"):
+            n = len(last.pop("images"))
+            last["content"] += (f"\n[The user pasted {n} image(s), but none of the available models can see images. "
+                                "Say so briefly and work from the text, or ask them to describe what it shows.]")
+            log.info("no available model takes images; continuing without them")
+
+    async def _can_see(self, client: httpx.AsyncClient, p: dict, model: str) -> bool:
+        """Whether this model really looks at images, checked once with a tiny red square and remembered.
+        Some models accept an image and quietly ignore it, then make up an answer: they must not get screenshots."""
+        lane = f"{p['id']}/{model}"
+        known = model_stats.flag(lane, "vision")
+        if known is not None:
+            return known
+        key = load_keys().get(p["id"], "")
+        msgs = [{"role": "user", "content": [{"type": "text", "text": "What colour is this square? Answer with one word."},
+                                             {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{VISION_PROBE}"}}]}]
+        try:
+            if p.get("kind") == "anthropic":
+                ok = True                                  # every current Claude model reads images
+            else:
+                r = await client.post(f"{_base(p, key)}/chat/completions", headers=_auth(p, key), timeout=30,
+                                       json=_body(p, {"model": model, "messages": msgs, "max_tokens": 400}))
+                text = ((r.json().get("choices") or [{}])[0].get("message") or {}).get("content") or "" if r.status_code == 200 else ""
+                if r.status_code == 429:
+                    return True                            # can't tell right now: let the real request decide
+                ok = "red" in text.lower()
+        except Exception:
+            return True
+        model_stats.set_flag(lane, "vision", ok)
+        log.info("%s %s images", lane, "can see" if ok else "can't see")
+        return ok
+
+    def _has_images(self) -> bool:
+        last = next((m for m in reversed(self.history) if m["role"] == "user" and not m.get("nudge")), None)
+        return bool(last and last.get("images"))
 
     def _order(self, lanes: list[tuple]) -> list[tuple]:
         """Which model tries first. Chat: the usual order (quick answers). Coding: the fastest model that is at least
@@ -1142,9 +1200,16 @@ class FallbackBrain:
             # earlier turns: drop intermediate tool steps, keep what was said
             if i < current and (m["role"] == "tool" or (m["role"] == "assistant" and m.get("tool_calls"))):
                 continue
+            imgs = m.get("images") or []
             if m["role"] == "user" and m["content"].startswith("[context:"):
                 m = {"role": "user", "content": m["content"].partition("\n")[2]}   # context goes in the system note
-            out.append({k: v for k, v in m.items() if k != "nudge"})
+            m = {k: v for k, v in m.items() if k not in ("nudge", "images")}
+            if imgs and i == current:                   # this turn's pasted images go to the model
+                m["content"] = [{"type": "text", "text": m["content"]}] + [
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b}"}} for b in imgs]
+            elif imgs:                                   # earlier turns: a note, not the pixels again
+                m["content"] = f"{m['content']}\n[{len(imgs)} image(s) were shared here]"
+            out.append(m)
         return _compact(out, budget)
 
     def _request_text(self) -> str:

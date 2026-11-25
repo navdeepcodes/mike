@@ -137,14 +137,21 @@
             <svg class="chev" viewBox="0 0 24 24"><path d="M7 10l5 5 5-5"/></svg>
           </button>
           <span class="cx-branch hidden" id="cxBranch"><svg viewBox="0 0 24 24"><circle cx="7" cy="6" r="2"/><circle cx="7" cy="18" r="2"/><circle cx="17" cy="9" r="2"/><path d="M7 8v8M17 11c0 3-4 3-10 5"/></svg><span id="cxBranchName"></span></span>
+          <span class="cx-hint" id="cxHint"></span>
           <div class="cx-grow"></div>
           <div class="cx-cmds" id="cxCmds"></div>
+          <button class="cx-tool" id="cxHistBtn" type="button" title="Past sessions"><svg viewBox="0 0 24 24"><path d="M4.5 12a7.5 7.5 0 1 0 2.2-5.3M4.5 4.5v3.8h3.8"/><path d="M12 8.5V12l2.5 1.8"/></svg></button>
           <button class="cx-tool" id="cxTermBtn" type="button" title="Terminal (⌃`)"><svg viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="14" rx="2.5"/><path d="M7.5 10l3 2.5-3 2.5M13 15h4"/></svg><i class="badge hidden" id="cxTermBadge"></i></button>
           <button class="cx-tool" id="cxPanelBtn" type="button" title="Changes and files"><svg viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><path d="M14.5 4.5v15"/></svg><i class="badge hidden" id="cxPanelBadge"></i></button>
         </div>
 
         <div class="cx-main">
           <div class="cx-center">
+            <div class="cx-past hidden" id="cxPast" role="status">
+              <svg viewBox="0 0 24 24"><path d="M4.5 12a7.5 7.5 0 1 0 2.2-5.3M4.5 4.5v3.8h3.8"/><path d="M12 8.5V12l2.5 1.8"/></svg>
+              <span id="cxPastText">Viewing a past session</span>
+              <button type="button" class="cx-chip" id="cxPastBack">Back to current session</button>
+            </div>
             <div class="cx-feed" id="cxFeed">
               <div class="cx-empty" id="cxEmpty">
                 <span class="mark big" aria-hidden="true"><i></i><i></i><i></i></span>
@@ -157,11 +164,14 @@
             <div class="cx-dock">
               <form class="cx-composer" id="cxForm">
                 <div class="cx-pop hidden" id="cxPop" role="listbox"></div>
+                <div class="cx-atts hidden" id="cxAtts" aria-label="Attached images"></div>
                 <textarea id="cxInput" rows="1" autocomplete="off" spellcheck="false" placeholder="Ask Mike to build, fix or explain…  /  for commands,  @  for files"></textarea>
                 <div class="cx-row">
                   <div class="cx-row-l">
+                    <button type="button" class="cx-mini cx-attach" id="cxAttach" title="Attach an image (or paste one)"><svg viewBox="0 0 24 24"><path d="M15.5 7.5l-6.8 6.8a1.8 1.8 0 0 0 2.5 2.5l7.2-7.2a3.5 3.5 0 0 0-5-5L6.2 11.8a5 5 0 0 0 7.1 7.1l6.2-6.2"/></svg></button>
+                    <input type="file" id="cxFile" accept="image/*" multiple hidden>
                     <button type="button" class="cx-chip" id="cxPlan" title="Plan first: Mike outlines the change and waits for your OK">Plan</button>
-                    <span class="cx-hint" id="cxHint"></span>
+                    <button type="button" class="cx-chip" id="cxAsk" title="Ask before each edit and command">Ask first</button>
                   </div>
                   <div class="cx-row-r">
                     <span class="cx-brain" id="cxBrain"></span>
@@ -197,6 +207,7 @@
             <div class="cx-panel-tabs">
               <button type="button" data-tab="changes" class="on">Changes <em id="cxChgCount"></em></button>
               <button type="button" data-tab="files">Files</button>
+              <button type="button" data-tab="history">History</button>
             </div>
             <div class="cx-panel-body" id="cxPanelBody"></div>
             <form class="cx-commit hidden" id="cxCommit">
